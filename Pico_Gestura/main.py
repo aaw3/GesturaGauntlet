@@ -13,7 +13,7 @@ oled.fill(0)
 oled.show()
 
 # Write your first message
-oled.text("Hi allen Gauntlet", 0, 0)
+oled.text("Gesture Gauntlet", 0, 0)
 oled.text("OLED is ACTIVE!", 0, 16)
 oled.text("Waiting...", 0, 32)
 
