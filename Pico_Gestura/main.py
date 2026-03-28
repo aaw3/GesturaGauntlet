@@ -2,16 +2,21 @@ import machine
 import uasyncio as asyncio
 import time
 import ujson
-from umqtt.simple import MQTTClient
+from lib.umqtt.simple import MQTTClient
+from lib.env import load_env
 from system_init import hardware_check, connect_wifi
 from modules.gui import GauntletGUI
 from modules.mpu6050 import MPU6050
-from modules.state import StateStore
+from modules.datastore import StateStore
+
+# Load env vars
+env = load_env()
+
 
 # --- CONFIGURATION ---
 WIFI_SSID = "UI-DeviceNet"
 WIFI_PASS = "UI-DeviceNet"
-MQTT_SERVER = "172.17.53.95" # Your laptop's IP address (NO http:// or ports needed)
+MQTT_SERVER = env.get("MQTT_SERVER", "")
 CLIENT_ID = "GesturaPico"
 
 led = machine.Pin("LED", machine.Pin.OUT)
@@ -32,7 +37,7 @@ def mqtt_callback(topic, msg):
         global_gui.update_state(mode=new_mode)
         print(f"Mode instantly changed to: {new_mode}")
 
-async def network_task(gui):
+async def network_task(gui, store):
     """Maintains the MQTT connection and publishes data."""
     mqtt_client.set_callback(mqtt_callback)
     
@@ -52,7 +57,7 @@ async def network_task(gui):
             mqtt_client.check_msg()
             
             # Publish live sensor data if we are in passive mode
-            state = gui.state_store.snapshot()
+            state = store.snapshot()
             if state.get("mode") == "PASSIVE":
                 payload = ujson.dumps({
                     "x": state.get("accel_x", 0.0),
@@ -70,13 +75,13 @@ async def network_task(gui):
         # Yield control. 20ms = 50Hz publish rate for buttery smooth UI tracking
         await asyncio.sleep_ms(20)
 
-async def sensor_task(gui, mpu):
+async def sensor_task(gui, mpu, store):
     """Constantly reads the physical I2C motion sensor."""
     while True:
         try:
             accel_data = mpu.get_accel()
             gyro_data = mpu.get_gyro()
-            gui.update_state(
+            store.update(
                 accel_x=accel_data['x'],
                 accel_y=accel_data['y'],
                 accel_z=accel_data['z'],
@@ -112,8 +117,8 @@ async def main():
     print("Starting Parallel Tasks...")
     await asyncio.gather(
         global_gui.display_task(),
-        sensor_task(global_gui, mpu),
-        network_task(global_gui)
+        sensor_task(global_gui, mpu, state_store),
+        network_task(global_gui, state_store)
     )
 
 if __name__ == "__main__":

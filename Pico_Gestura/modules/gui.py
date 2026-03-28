@@ -7,13 +7,13 @@ class GauntletGUI:
         self.width = width
         self.height = height
         self.oled = ssd1306.SSD1306_I2C(self.width, self.height, i2c)
-        self.state_store = state_store
+        self._store = state_store
         
     def update_state(self, **kwargs):
-        self.state_store.update(**kwargs)
+        self._store.update(**kwargs)
 
     def render(self):
-        state = self.state_store.snapshot()
+        state = self._store.snapshot()
         self.oled.fill(0) 
         
         # Top Status Bar
