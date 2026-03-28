@@ -3,7 +3,7 @@ import uasyncio as asyncio
 import time
 import ujson
 from lib.umqtt.simple import MQTTClient
-from lib.env import load_env
+from lib.env import load_env, _parse_mqtt_server
 from system_init import hardware_check, connect_wifi
 from modules.gui import GauntletGUI
 from modules.mpu6050 import MPU6050
@@ -27,8 +27,12 @@ def trigger_hardware_panic(error_code):
         led.toggle()
         time.sleep(0.1)
 
+
+MQTT_HOST, MQTT_PORT = _parse_mqtt_server(MQTT_SERVER)
+print(f"MQTT target: {MQTT_HOST}:{MQTT_PORT}")
+
 # Global MQTT Client
-mqtt_client = MQTTClient(CLIENT_ID, MQTT_SERVER, keepalive=60)
+mqtt_client = MQTTClient(CLIENT_ID, MQTT_HOST, port=MQTT_PORT, keepalive=60)
 
 def mqtt_callback(topic, msg):
     """Fires instantly when the Node server sends a mode change."""
@@ -98,11 +102,14 @@ async def main():
     print("--- Booting Gestura Gauntlet OS ---")
     
     try:
-        i2c = hardware_check()
+        i2c, devices = hardware_check()
         ip = connect_wifi(WIFI_SSID, WIFI_PASS)
         
         # Initialize the hardware
-        mpu = MPU6050(i2c)
+        mpu_addr = 0x68 if 0x68 in devices else 0x69 if 0x69 in devices else None
+        if mpu_addr is None:
+            raise Exception("MPU6050 not found on I2C (expected 0x68 or 0x69). Check wiring/AD0.")
+        mpu = MPU6050(i2c, addr=mpu_addr)
         global global_gui
         state_store = StateStore()
         global_gui = GauntletGUI(i2c, state_store)

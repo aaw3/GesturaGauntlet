@@ -15,13 +15,23 @@ def load_env(filename=".env"):
                     continue
                 if "=" in line:
                     key, value = line.split("=", 1)
-                    config[key.strip()] = value.strip()
+                    value = value.strip()
+                    # Strip surrounding single/double quotes if present
+                    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                        value = value[1:-1]
+                    config[key.strip()] = value
     except OSError:
         print(f"Warning: {filename} file not found.")
     return config
 
-# Example usage:
-env_vars = load_env()
-# Access your variables like this:
-api_key = env_vars.get("API_KEY", "default_value_if_not_found")
-print(f"API Key: {api_key}") 
+def _parse_mqtt_server(server):
+    # Accept "host" or "host:port"
+    if not server:
+        return "", 1883
+    if ":" in server:
+        host, port_str = server.rsplit(":", 1)
+        try:
+            return host, int(port_str)
+        except ValueError:
+            return server, 1883
+    return server, 1883

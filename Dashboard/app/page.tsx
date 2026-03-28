@@ -17,7 +17,7 @@ export default function Dashboard() {
   const [networkStatus, setNetworkStatus] = useState<"connected" | "disconnected" | "unknown">("unknown");
   const [activeMode, setActiveMode] = useState<"active" | "passive" | null>(null);
   const [isSimulating, setIsSimulating] = useState(false);
-  const [sensorData, setSensorData] = useState({ x: 0, y: 0, z: 0 });
+  const [sensorData, setSensorData] = useState({ x: 0, y: 0, z: 0, gx: 0, gy: 0, gz: 0 });
 
   // --- 1. WEBSOCKET CONNECTION & LISTENERS ---
   useEffect(() => {
@@ -38,13 +38,16 @@ export default function Dashboard() {
     });
 
     // Firehose of data from the Pico
-    socket.on("sensorData", (data: { x: number; y: number; z: number; }) => {
+    socket.on("sensorData", (data: { x: number; y: number; z: number; gx?: number; gy?: number; gz?: number; }) => {
       // Only use live data if we aren't using the local UI simulator
       if (!isSimulating) {
         setSensorData({
           x: data.x || 0,
           y: data.y || 0,
           z: data.z || 0,
+          gx: data.gx || 0,
+          gy: data.gy || 0,
+          gz: data.gz || 0,
         });
       }
     });
@@ -79,6 +82,9 @@ export default function Dashboard() {
           x: parseFloat((Math.random() * 2 - 1).toFixed(3)),
           y: parseFloat((Math.random() * 2 - 1).toFixed(3)),
           z: parseFloat((Math.random() * 2 - 1).toFixed(3)),
+          gx: parseFloat((Math.random() * 250 - 125).toFixed(3)),
+          gy: parseFloat((Math.random() * 250 - 125).toFixed(3)),
+          gz: parseFloat((Math.random() * 250 - 125).toFixed(3)),
         });
       }, 500);
     }
