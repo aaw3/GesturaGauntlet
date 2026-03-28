@@ -1,46 +1,75 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
+import { io, Socket } from "socket.io-client";
 import { SystemStatusPanel } from "@/components/dashboard/system-status-panel";
 import { NetworkStatusIndicator } from "@/components/dashboard/network-status-indicator";
 import { LiveSensorData } from "@/components/dashboard/live-sensor-data";
 import { OledMessagePanel } from "@/components/dashboard/oled-message-panel";
 import { Hand, Activity } from "lucide-react";
 
+// Declare socket outside to prevent constant reconnections on UI renders
+let socket: Socket;
+
 export default function Dashboard() {
-  const [picoIp, setPicoIp] = useState("192.168.1.100");
+  // Changed from picoIp to brokerUrl (pointing to your Node.js server)
+  const [brokerUrl, setBrokerUrl] = useState("http://localhost:3001");
   const [networkStatus, setNetworkStatus] = useState<"connected" | "disconnected" | "unknown">("unknown");
   const [activeMode, setActiveMode] = useState<"active" | "passive" | null>(null);
   const [isSimulating, setIsSimulating] = useState(false);
   const [sensorData, setSensorData] = useState({ x: 0, y: 0, z: 0 });
 
-  const sendRequest = useCallback(async (endpoint: string): Promise<boolean> => {
-    try {
-      const response = await fetch(`http://${picoIp}${endpoint}`, {
-        method: "GET",
-        mode: "no-cors",
-      });
+  // --- 1. WEBSOCKET CONNECTION & LISTENERS ---
+  useEffect(() => {
+    // Connect to the Node Broker
+    socket = io(brokerUrl);
+
+    socket.on("connect", () => {
       setNetworkStatus("connected");
-      return true;
-    } catch (error) {
-      console.error("Request failed:", error);
+    });
+
+    socket.on("disconnect", () => {
       setNetworkStatus("disconnected");
-      return false;
-    }
-  }, [picoIp]);
+    });
 
-  const handleModeChange = async (mode: "active" | "passive") => {
-    const success = await sendRequest(`/mode?set=${mode}`);
-    if (success) {
-      setActiveMode(mode);
+    // Update UI when the server confirms a mode change
+    socket.on("modeUpdate", (newMode) => {
+      setActiveMode(newMode);
+    });
+
+    // Firehose of data from the Pico
+    socket.on("sensorData", (data: { x: number; y: number; z: number; }) => {
+      // Only use live data if we aren't using the local UI simulator
+      if (!isSimulating) {
+        setSensorData({
+          x: data.x || 0,
+          y: data.y || 0,
+          z: data.z || 0,
+        });
+      }
+    });
+
+    // Cleanup on unmount
+    return () => {
+      if (socket) socket.disconnect();
+    };
+  }, [brokerUrl, isSimulating]);
+
+  // --- 2. EMIT ACTIONS TO SERVER ---
+  const handleModeChange = (mode: "active" | "passive") => {
+    if (socket && socket.connected) {
+      socket.emit("setMode", mode);
+      // We don't manually setActiveMode here; we wait for the server's 'modeUpdate' broadcast
     }
   };
 
-  const handleSendMessage = async (message: string) => {
-    const encodedMessage = encodeURIComponent(message);
-    await sendRequest(`/message?text=${encodedMessage}`);
+  const handleSendMessage = (message: string) => {
+    if (socket && socket.connected) {
+      socket.emit("sendMessage", message); 
+    }
   };
 
+  // --- 3. LOCAL SIMULATOR (Fallback for UI testing) ---
   useEffect(() => {
     let interval: NodeJS.Timeout;
     
@@ -59,6 +88,7 @@ export default function Dashboard() {
     };
   }, [isSimulating]);
 
+  // --- 4. UI RENDERING ---
   return (
     <div className="min-h-screen bg-background p-4 md:p-8">
       <div className="mx-auto max-w-6xl">
@@ -78,13 +108,13 @@ export default function Dashboard() {
           
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2 rounded-lg bg-card px-3 py-2 border border-border">
-              <span className="text-xs text-muted-foreground">Pico IP:</span>
+              <span className="text-xs text-muted-foreground">Broker URL:</span>
               <input
                 type="text"
-                value={picoIp}
-                onChange={(e) => setPicoIp(e.target.value)}
-                className="w-32 bg-transparent text-sm text-foreground outline-none font-mono"
-                placeholder="192.168.1.100"
+                value={brokerUrl}
+                onChange={(e) => setBrokerUrl(e.target.value)}
+                className="w-40 bg-transparent text-sm text-foreground outline-none font-mono"
+                placeholder="http://localhost:3001"
               />
             </div>
             <NetworkStatusIndicator status={networkStatus} />
@@ -109,8 +139,8 @@ export default function Dashboard() {
             </div>
             <div className="space-y-3">
               <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">Device IP</span>
-                <span className="font-mono text-foreground">{picoIp}</span>
+                <span className="text-muted-foreground">Server</span>
+                <span className="font-mono text-foreground text-xs">{brokerUrl}</span>
               </div>
               <div className="flex items-center justify-between text-sm">
                 <span className="text-muted-foreground">Status</span>
