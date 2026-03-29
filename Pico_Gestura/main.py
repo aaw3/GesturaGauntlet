@@ -9,42 +9,43 @@ from modules.gui import GauntletGUI
 from modules.mpu6050 import MPU6050
 from modules.button import GauntletButton
 from modules.datastore import StateStore
-
+ 
 # Load env vars
 env = load_env()
-
-
+ 
+ 
 # --- CONFIGURATION ---
 WIFI_SSID = "UI-DeviceNet"
 WIFI_PASS = "UI-DeviceNet"
 MQTT_SERVER = env.get("MQTT_SERVER", "")
-MQTT_SERVER = "172.17.53.95" # Your Node.js server IP
 CLIENT_ID = "GesturaPico"
-
+ 
 led = machine.Pin("LED", machine.Pin.OUT)
-
+ 
 def trigger_hardware_panic(error_code):
     print(f"FATAL ERROR: {error_code}")
     while True:
         led.toggle()
         time.sleep(0.1)
-
-
+ 
+ 
 MQTT_HOST, MQTT_PORT = _parse_mqtt_server(MQTT_SERVER)
 print(f"MQTT target: {MQTT_HOST}:{MQTT_PORT}")
-
+ 
 # Global MQTT Client
 mqtt_client = MQTTClient(CLIENT_ID, MQTT_HOST, port=MQTT_PORT, keepalive=60)
-
+ 
 def mqtt_callback(topic, msg):
+    """Fires instantly when the Node server sends a mode change."""
     if topic == b'gauntlet/mode':
         new_mode = msg.decode('utf-8').upper()
         global_gui.update_state(mode=new_mode)
         print(f"Mode instantly changed to: {new_mode}")
-
+ 
 async def network_task(gui, store):
     """Maintains the MQTT connection and publishes data."""
     mqtt_client.set_callback(mqtt_callback)
+    
     try:
         mqtt_client.connect()
         mqtt_client.subscribe(b"gauntlet/mode")
@@ -54,9 +55,10 @@ async def network_task(gui, store):
         print("MQTT Connection Failed:", e)
         gui.update_state(connected=False)
         return
-
+ 
     while True:
         try:
+            # Check for incoming mode changes from the dashboard
             mqtt_client.check_msg()
             
             # Publish live sensor data if we are in passive mode
@@ -71,10 +73,13 @@ async def network_task(gui, store):
                     "gz": state.get("gyro_z", 0.0)
                 })
                 mqtt_client.publish(b"gauntlet/sensors", payload)
+                
         except Exception as e:
-            pass
+            print("MQTT Error:", e)
+            
+        # Yield control. 20ms = 50Hz publish rate for buttery smooth UI tracking
         await asyncio.sleep_ms(20)
-
+ 
 async def sensor_task(gui, mpu, store):
     """Constantly reads the physical I2C motion sensor."""
     while True:
@@ -90,9 +95,10 @@ async def sensor_task(gui, mpu, store):
                 gyro_z=gyro_data['z']
             )
         except Exception as e:
-            pass
-        await asyncio.sleep_ms(20)
-
+            pass # Ignore occasional I2C read errors
+            
+        await asyncio.sleep_ms(20) # Read at 50Hz
+ 
 async def main():
     print("--- Booting Gestura Gauntlet OS ---")
     
@@ -106,25 +112,26 @@ async def main():
             raise Exception("MPU6050 not found on I2C (expected 0x68 or 0x69). Check wiring/AD0.")
         mpu = MPU6050(i2c, addr=mpu_addr)
         global global_gui
-        global_gui = GauntletGUI(i2c_oled)
+        state_store = StateStore()
+        global_gui = GauntletGUI(i2c, state_store)
         
     except Exception as e:
         trigger_hardware_panic(str(e))
-
+ 
     global_gui.update_state(connected=True, mode="PASSIVE")
     global_gui.render()
-    
-    # Initialize the physical button on GP14
-    action_button = GauntletButton(pin_num=14)
-    time.sleep(1)
 
+    action_button = GauntletButton(pin_num=13)
+    time.sleep(1)
+ 
     print("Starting Parallel Tasks...")
     await asyncio.gather(
         global_gui.display_task(),
         sensor_task(global_gui, mpu, state_store),
-        network_task(global_gui, state_store)
+        network_task(global_gui, state_store),
+        action_button.monitor(global_gui, mqtt_client)
     )
-
+ 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
