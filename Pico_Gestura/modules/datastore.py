@@ -3,6 +3,8 @@ class StateStore:
         self._state = {
             "connected": False,
             "mode": "INIT",
+            "action": "Starting...",
+            "calibrate_req": False,
             "accel_x": 0.0,
             "accel_y": 0.0,
             "accel_z": 0.0,

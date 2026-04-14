@@ -97,8 +97,20 @@ async def sensor_task(gui, mpu, store):
     """Constantly reads the physical I2C motion sensor."""
     while True:
         try:
+            # Check for calibration request
+            state = store.snapshot()
+            if state.get("calibrate_req"):
+                print("Sensor task: Starting calibration...")
+                mpu.calibrate(samples=100)
+                store.update(calibrate_req=False)
+                print("Sensor task: Calibration finished.")
+
             accel_data = mpu.get_accel()
             gyro_data = mpu.get_gyro()
+            
+            # Apply runtime re-zeroing for gyro (alpha=0.999 for slower drift)
+            mpu.runtime_re_zero(gyro_data['x'], gyro_data['y'], gyro_data['z'], alpha=0.999)
+
             store.update(
                 accel_x=accel_data['x'],
                 accel_y=accel_data['y'],
@@ -108,7 +120,7 @@ async def sensor_task(gui, mpu, store):
                 gyro_z=gyro_data['z']
             )
         except Exception as e:
-            pass # Ignore occasional I2C read errors
+            print(f"Sensor Task Error: {e}")
             
         await asyncio.sleep_ms(20) # Read at 50Hz
  
@@ -131,8 +143,12 @@ async def main():
     except Exception as e:
         trigger_hardware_panic(str(e))
  
-    global_gui.update_state(connected=True, mode="PASSIVE")
+    global_gui.update_state(connected=True, mode="PASSIVE", action="Boot Calibrate")
     global_gui.render()
+    
+    print("Performing Initial Calibration (Hold Steady)...")
+    mpu.calibrate(samples=50)
+    global_gui.update_state(action="Ready")
 
     action_button = GauntletButton(pin_num=13)
     time.sleep(1)

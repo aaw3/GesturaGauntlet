@@ -6,40 +6,80 @@ class MPU6050:
         self.addr = addr
         
         # 1. Wake up the MPU-6050 
-        # (It starts in sleep mode to save power. Register 0x6B controls power management)
         self.i2c.writeto_mem(self.addr, 0x6B, b'\x00')
 
-    def get_accel(self):
-        # 2. Read 6 bytes of accelerometer data starting from register 0x3B
-        # This grabs High and Low bytes for X, Y, and Z all at once
+        # 2. Calibration Offsets
+        self.ax_offset = 0.0
+        self.ay_offset = 0.0
+        self.az_offset = 0.0 # Expected 1.0g when flat
+        self.gx_offset = 0.0
+        self.gy_offset = 0.0
+        self.gz_offset = 0.0
+
+    def calibrate(self, samples=50):
+        """Perform a heavy calibration while the device is stationary and flat."""
+        ax_sum = ay_sum = az_sum = 0
+        gx_sum = gy_sum = gz_sum = 0
+        
+        for _ in range(samples):
+            data_a = self._read_raw_accel()
+            data_g = self._read_raw_gyro()
+            ax_sum += data_a['x']
+            ay_sum += data_a['y']
+            az_sum += data_a['z']
+            gx_sum += data_g['x']
+            gy_sum += data_g['y']
+            gz_sum += data_g['z']
+            
+        self.ax_offset = ax_sum / samples
+        self.ay_offset = ay_sum / samples
+        self.az_offset = (az_sum / samples) - 1.0 # Offset from 1.0g
+        
+        self.gx_offset = gx_sum / samples
+        self.gy_offset = gy_sum / samples
+        self.gz_offset = gz_sum / samples
+        print(f"Calibrated! Offsets: A({self.ax_offset:.3f},{self.ay_offset:.3f},{self.az_offset:.3f}) G({self.gx_offset:.3f},{self.gy_offset:.3f},{self.gz_offset:.3f})")
+
+    def runtime_re_zero(self, gx, gy, gz, alpha=0.99):
+        """Slowly update gyro offsets if the device is perceived to be still."""
+        # Simple threshold check: if gyro rotation is < 2 degrees/sec, assume still
+        if abs(gx) < 2.0 and abs(gy) < 2.0 and abs(gz) < 2.0:
+            # User formula: alpha * offset + (1 - alpha) * new_reading
+            # This is applied to the raw-ish reading to update the baseline
+            self.gx_offset = (alpha * self.gx_offset) + ((1 - alpha) * (gx + self.gx_offset))
+            self.gy_offset = (alpha * self.gy_offset) + ((1 - alpha) * (gy + self.gy_offset))
+            self.gz_offset = (alpha * self.gz_offset) + ((1 - alpha) * (gz + self.gz_offset))
+
+    def _read_raw_accel(self):
         data = self.i2c.readfrom_mem(self.addr, 0x3B, 6)
-        
-        # 3. Combine the High and Low bytes
-        x = self._bytes_to_int(data[0], data[1])
-        y = self._bytes_to_int(data[2], data[3])
-        z = self._bytes_to_int(data[4], data[5])
-        
-        # 4. Convert raw data to standard G-forces 
-        # (The default +/- 2g range has a scale factor of 16384)
         return {
-            'x': x / 16384.0, 
-            'y': y / 16384.0, 
-            'z': z / 16384.0
+            'x': self._bytes_to_int(data[0], data[1]) / 16384.0,
+            'y': self._bytes_to_int(data[2], data[3]) / 16384.0,
+            'z': self._bytes_to_int(data[4], data[5]) / 16384.0
+        }
+
+    def _read_raw_gyro(self):
+        data = self.i2c.readfrom_mem(self.addr, 0x43, 6)
+        return {
+            'x': self._bytes_to_int(data[0], data[1]) / 131.0,
+            'y': self._bytes_to_int(data[2], data[3]) / 131.0,
+            'z': self._bytes_to_int(data[4], data[5]) / 131.0
+        }
+
+    def get_accel(self):
+        raw = self._read_raw_accel()
+        return {
+            'x': raw['x'] - self.ax_offset,
+            'y': raw['y'] - self.ay_offset,
+            'z': raw['z'] - self.az_offset
         }
 
     def get_gyro(self):
-        # Read 6 bytes of gyroscope data starting from register 0x43
-        data = self.i2c.readfrom_mem(self.addr, 0x43, 6)
-
-        x = self._bytes_to_int(data[0], data[1])
-        y = self._bytes_to_int(data[2], data[3])
-        z = self._bytes_to_int(data[4], data[5])
-
-        # Default +/- 250 dps range has a scale factor of 131
+        raw = self._read_raw_gyro()
         return {
-            'x': x / 131.0,
-            'y': y / 131.0,
-            'z': z / 131.0
+            'x': raw['x'] - self.gx_offset,
+            'y': raw['y'] - self.gy_offset,
+            'z': raw['z'] - self.gz_offset
         }
 
     def _bytes_to_int(self, msb, lsb):
