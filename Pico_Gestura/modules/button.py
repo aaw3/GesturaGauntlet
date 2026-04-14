@@ -9,15 +9,24 @@ class GauntletButton:
 
     async def monitor(self, gui, mqtt_client):
         print("--- Button Monitor Started (GP13) ---")
+        debug_counter = 0
         
         while True:
             try:
-                # Debug: Print raw value occasionally if needed, but let's stick to logic
                 val = self.button.value()
                 
+                # --- HIGH FREQUENCY DEBUG PRINT ---
+                # This prints every ~200ms so you can see the real-time state
+                debug_counter += 1
+                if debug_counter >= 4: 
+                    status = "LOW (PRESSED)" if val == 0 else "HIGH (OPEN)"
+                    print(f"DEBUG: PIN 13 IS {status}")
+                    debug_counter = 0
+
                 # 1. Detect if the button is pressed down (0 = Pressed for PULL_UP)
                 if val == 0: 
-                    print("Button Down detected...")
+                    print(">>> PHYSICAL BUTTON PRESS DETECTED! <<<")
+                    gui.update_state(action="BUTTON PRESSED")
                     press_start = time.ticks_ms()
                     
                     # 2. Wait in this loop until the user lets go of the button
@@ -32,17 +41,15 @@ class GauntletButton:
                     if duration >= 1000:
                         print(">>> TRIGGERING RECALIBRATION <<<")
                         gui.update_state(action="CALIBRATING...", calibrate_req=True)
-                        
-                        # Wait 3 seconds to let user hold device still
+                        # The sensor_task in main.py will handle the actual MPU call
                         await asyncio.sleep_ms(3000)
-                        
                         gui.update_state(action="CALIBRATED!")
                         await asyncio.sleep_ms(1000)
                         gui.update_state(action="PASSIVE MODE")
                         
                     # --- SHORT PRESS ---
                     elif duration > 50: 
-                        print(">>> SHORT PRESS <<<")
+                        print(">>> SHORT PRESS ACTION <<<")
                         gui.update_state(action="ACTION SENT")
                         if mqtt_client:
                             mqtt_client.publish(b"gauntlet/action", b"single_press")
