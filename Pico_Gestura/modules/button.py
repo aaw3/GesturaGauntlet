@@ -14,19 +14,9 @@ class GauntletButton:
         while True:
             try:
                 val = self.button.value()
-                
-                # --- HIGH FREQUENCY DEBUG PRINT ---
-                # This prints every ~200ms so you can see the real-time state
-                debug_counter += 1
-                if debug_counter >= 4: 
-                    status = "LOW (PRESSED)" if val == 0 else "HIGH (OPEN)"
-                    print(f"DEBUG: PIN 13 IS {status}")
-                    debug_counter = 0
-
+            
                 # 1. Detect if the button is pressed down (0 = Pressed for PULL_UP)
                 if val == 0: 
-                    print(">>> PHYSICAL BUTTON PRESS DETECTED! <<<")
-                    gui.update_state(action="BUTTON PRESSED")
                     press_start = time.ticks_ms()
                     
                     # 2. Wait in this loop until the user lets go of the button
