@@ -41,7 +41,6 @@ function publishMode(mode) {
     retain:  true,   // retain=true so a reconnecting Pico gets it immediately
   });
 }
-<<<<<<< HEAD
 
 // Relay broker publishes to the frontend
 aedes.on('publish', (packet, client) => {
@@ -107,50 +106,6 @@ aedes.on('publish', (packet, client) => {
       // Tell the React dashboard to flip its UI instantly
       io.emit('modeUpdate', currentMode);
     }
-=======
- 
-// ─── Sensor Pipeline: MQTT → Focus Score → Kasa ──────────────────────────────
- 
-aedes.on('publish', async (packet, client) => {
-  if (packet.topic !== MQTT_TOPIC_SENSORS) return;
- 
-  let data;
-  try {
-    data = JSON.parse(packet.payload.toString());
-  } catch (err) {
-    console.error('[MQTT] Sensor parse error:', err);
-    return;
-  }
- 
-  const payload = {
-    x:  data.x  ?? 0,
-    y:  data.y  ?? 0,
-    z:  data.z  ?? 0,
-    gx: data.gx ?? 0,
-    gy: data.gy ?? 0,
-    gz: data.gz ?? 0,
-  };
- 
-  // 1. Forward raw data to the React dashboard
-  io.emit('sensorData', payload);
- 
-  // 2. Only run analytics in passive mode
-  if (currentMode !== 'passive') return;
- 
-  // 3. Push into rolling window and compute focus score
-  accelWindow.push(payload);
-  if (accelWindow.length > WINDOW_SIZE) accelWindow.shift();
- 
-  if (accelWindow.length === WINDOW_SIZE) {
-    const variance = computeVariance(accelWindow);
-    const score    = updateFocusScore(variance);
- 
-    io.emit('focusScore', score);
-    io.emit('variance',   parseFloat(variance.toFixed(5)));
- 
-    // 4. Trigger Kasa devices based on focus score
-    await handleFocusAction(score);
->>>>>>> c0678fa998ec2808c57cfedc781b3d7d9201b68d
   }
 }
 });
