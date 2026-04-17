@@ -154,7 +154,8 @@ async def main():
     mpu.calibrate(samples=50)
     global_gui.update_state(action="Ready")
 
-    action_button = GauntletButton(pin_num=13)
+    action_button = GauntletButton(pin_num=13, name="Action")
+    mode_button = GauntletButton(pin_num=12, name="Mode Toggle")
     time.sleep(1)
  
     print("Starting Parallel Tasks...")
@@ -162,7 +163,8 @@ async def main():
         global_gui.display_task(),
         sensor_task(global_gui, mpu, state_store),
         network_task(global_gui, state_store),
-        action_button.monitor(global_gui, mqtt_client)
+        action_button.monitor(global_gui, mqtt_client, state_store),
+        mode_button.monitor(global_gui, mqtt_client, state_store)
     )
  
 if __name__ == "__main__":

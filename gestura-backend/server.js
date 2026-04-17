@@ -102,6 +102,8 @@ aedes.on('publish', (packet, client) => {
     io.emit('sensorData', payload);
   } catch (err) {
     console.error('MQTT sensor parse error:', err, 'payload=', trimmed.slice(0, 120));
+  }
+
   // 2. NEW: Handle Mode Toggles from the physical double-tap
   if (packet.topic === MQTT_TOPIC_MODE && client) {
     // The "client" check ensures we don't react to our own server messages
@@ -115,7 +117,6 @@ aedes.on('publish', (packet, client) => {
       io.emit('modeUpdate', currentMode);
     }
   }
-}
 });
 
 // --- WEBSOCKET CONNECTION (Talks to React) ---
