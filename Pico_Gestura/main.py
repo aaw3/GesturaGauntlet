@@ -12,11 +12,13 @@ from modules.datastore import StateStore
  
 # Load env vars
 env = load_env()
- 
- 
+
 # --- CONFIGURATION ---
-WIFI_SSID = "UI-DeviceNet"
-WIFI_PASS = "UI-DeviceNet"
+WIFI_SSID = env.get("WIFI_SSID")
+WIFI_PASS = env.get("WIFI_PASS")
+
+print("SSID:", repr(WIFI_SSID))
+
 MQTT_SERVER = env.get("MQTT_SERVER", "")
 CLIENT_ID = "GesturaPico"
  
