@@ -70,18 +70,20 @@ async def network_task(gui, store):
                 # Check for incoming mode changes from the dashboard
                 mqtt_client.check_msg()
 
-                # Publish live sensor data if we are in passive mode
+                # Publish live sensor data in both passive and active modes.
+                # The backend decides how to use it for dashboard telemetry,
+                # focus scoring, and Kasa light control.
                 state = store.snapshot()
-                if state.get("mode") == "PASSIVE":
-                    payload = ujson.dumps({
-                        "x": state.get("accel_x", 0.0),
-                        "y": state.get("accel_y", 0.0),
-                        "z": state.get("accel_z", 0.0),
-                        "gx": state.get("gyro_x", 0.0),
-                        "gy": state.get("gyro_y", 0.0),
-                        "gz": state.get("gyro_z", 0.0)
-                    }).encode("utf-8")
-                    mqtt_client.publish(b"gauntlet/sensors", payload)
+                payload = ujson.dumps({
+                    "mode": state.get("mode", "UNKNOWN"),
+                    "x": state.get("accel_x", 0.0),
+                    "y": state.get("accel_y", 0.0),
+                    "z": state.get("accel_z", 0.0),
+                    "gx": state.get("gyro_x", 0.0),
+                    "gy": state.get("gyro_y", 0.0),
+                    "gz": state.get("gyro_z", 0.0)
+                }).encode("utf-8")
+                mqtt_client.publish(b"gauntlet/sensors", payload)
 
             except Exception as e:
                 print("MQTT Error:", e)

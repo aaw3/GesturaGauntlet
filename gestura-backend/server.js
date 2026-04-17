@@ -50,23 +50,26 @@ const liveSensorState = {
   source: null,
 };
 
-// Live gyro-X -> Kasa bulb brightness control.
+// Live X-axis -> Kasa bulb brightness control.
 // Default: only active mode drives the bulb. Use GYRO_BULB_CONTROL_MODE=always
 // if you want passive dashboard viewing and bulb control at the same time.
 const gyroBulbControl = {
   enabled: String(process.env.GYRO_BULB_CONTROL_ENABLED || 'true') !== 'false',
   mode: process.env.GYRO_BULB_CONTROL_MODE || 'active', // active | passive | always
-  axis: process.env.GYRO_BULB_AXIS || 'gx',
+  axis: process.env.GYRO_BULB_AXIS || 'x',
   axisMin: Number(process.env.GYRO_BULB_AXIS_MIN || -1),
   axisMax: Number(process.env.GYRO_BULB_AXIS_MAX || 1),
-  smoothing: Number(process.env.GYRO_BULB_SMOOTHING || 0.35),
-  throttleMs: Number(process.env.GYRO_BULB_THROTTLE_MS || 500),
-  minBrightnessDelta: Number(process.env.GYRO_BULB_MIN_DELTA || 2),
-  transitionMs: Number(process.env.GYRO_BULB_TRANSITION_MS || 150),
+  smoothing: Number(process.env.GYRO_BULB_SMOOTHING || 0.6),
+  throttleMs: Number(process.env.GYRO_BULB_THROTTLE_MS || 125),
+  minBrightnessDelta: Number(process.env.GYRO_BULB_MIN_DELTA || 1),
+  transitionMs: Number(process.env.GYRO_BULB_TRANSITION_MS || 80),
   powerOffAtZero: String(process.env.GYRO_BULB_POWER_OFF_AT_ZERO || 'true') !== 'false',
   smoothedAxis: null,
   lastBrightness: null,
   lastSentAt: 0,
+  inFlight: false,
+  pending: null,
+  pendingTimer: null,
   lastResult: null,
 };
 
@@ -169,6 +172,72 @@ async function handleFocusAction(score) {
   }
 }
 
+function brightnessChangedEnough(brightness) {
+  return (
+    gyroBulbControl.lastBrightness === null ||
+    Math.abs(brightness - gyroBulbControl.lastBrightness) >= gyroBulbControl.minBrightnessDelta
+  );
+}
+
+function schedulePendingGyroBulbUpdate(delayMs) {
+  if (gyroBulbControl.pendingTimer) return;
+
+  gyroBulbControl.pendingTimer = setTimeout(() => {
+    gyroBulbControl.pendingTimer = null;
+    const pending = gyroBulbControl.pending;
+    gyroBulbControl.pending = null;
+    if (!pending || !brightnessChangedEnough(pending.brightness)) return;
+
+    void sendGyroBulbBrightness(pending).catch((err) => {
+      console.error('[GyroBulb] Pending control error:', err.message);
+    });
+  }, Math.max(0, delayMs));
+}
+
+async function sendGyroBulbBrightness(update) {
+  if (gyroBulbControl.inFlight) {
+    gyroBulbControl.pending = update;
+    return;
+  }
+
+  const now = Date.now();
+  const elapsed = now - gyroBulbControl.lastSentAt;
+  if (elapsed < gyroBulbControl.throttleMs) {
+    gyroBulbControl.pending = update;
+    schedulePendingGyroBulbUpdate(gyroBulbControl.throttleMs - elapsed);
+    return;
+  }
+
+  gyroBulbControl.inFlight = true;
+  gyroBulbControl.lastSentAt = now;
+  gyroBulbControl.lastBrightness = update.brightness;
+
+  try {
+    const result = await kasa.setBulbBrightness(update.brightness, {
+      transitionMs: gyroBulbControl.transitionMs,
+      powerOffAtZero: gyroBulbControl.powerOffAtZero,
+    });
+
+    gyroBulbControl.lastResult = {
+      ...result,
+      axis: gyroBulbControl.axis,
+      axisValue: update.axisValue,
+      smoothedAxis: update.smoothedAxis,
+      brightness: update.brightness,
+      updatedAt: new Date().toISOString(),
+    };
+
+    io.emit('gyroBulbUpdate', gyroBulbControl.lastResult);
+  } finally {
+    gyroBulbControl.inFlight = false;
+
+    const pending = gyroBulbControl.pending;
+    if (pending && brightnessChangedEnough(pending.brightness)) {
+      schedulePendingGyroBulbUpdate(gyroBulbControl.throttleMs);
+    }
+  }
+}
+
 async function handleGyroBulbControl(sensor) {
   if (!isGyroBulbControlActive()) return;
 
@@ -187,32 +256,16 @@ async function handleGyroBulbControl(sensor) {
   );
 
   const now = Date.now();
-  if (now - gyroBulbControl.lastSentAt < gyroBulbControl.throttleMs) return;
-  if (
-    gyroBulbControl.lastBrightness !== null &&
-    Math.abs(brightness - gyroBulbControl.lastBrightness) < gyroBulbControl.minBrightnessDelta
-  ) {
-    return;
-  }
-
-  gyroBulbControl.lastSentAt = now;
-  gyroBulbControl.lastBrightness = brightness;
-
-  const result = await kasa.setBulbBrightness(brightness, {
-    transitionMs: gyroBulbControl.transitionMs,
-    powerOffAtZero: gyroBulbControl.powerOffAtZero,
-  });
-
-  gyroBulbControl.lastResult = {
-    ...result,
+  const update = {
     axis: gyroBulbControl.axis,
     axisValue: rawAxis,
     smoothedAxis: gyroBulbControl.smoothedAxis,
     brightness,
-    updatedAt: new Date().toISOString(),
+    queuedAt: now,
   };
 
-  io.emit('gyroBulbUpdate', gyroBulbControl.lastResult);
+  if (!brightnessChangedEnough(brightness)) return;
+  await sendGyroBulbBrightness(update);
 }
 
 async function handleSensorUpdate(data, source = 'unknown') {
@@ -257,11 +310,17 @@ function updateGyroBulbControl(nextConfig = {}) {
   if (nextConfig.axis !== undefined && ['x', 'y', 'z', 'gx', 'gy', 'gz'].includes(nextConfig.axis)) {
     gyroBulbControl.axis = nextConfig.axis;
     gyroBulbControl.smoothedAxis = null;
+    gyroBulbControl.pending = null;
   }
 
   for (const key of ['axisMin', 'axisMax', 'smoothing', 'throttleMs', 'minBrightnessDelta', 'transitionMs']) {
     if (nextConfig[key] !== undefined) gyroBulbControl[key] = toFiniteNumber(nextConfig[key], gyroBulbControl[key]);
   }
+
+  gyroBulbControl.smoothing = Math.max(0, Math.min(1, gyroBulbControl.smoothing));
+  gyroBulbControl.throttleMs = Math.max(75, gyroBulbControl.throttleMs);
+  gyroBulbControl.minBrightnessDelta = Math.max(0, gyroBulbControl.minBrightnessDelta);
+  gyroBulbControl.transitionMs = Math.max(0, gyroBulbControl.transitionMs);
 
   if (nextConfig.powerOffAtZero !== undefined) {
     gyroBulbControl.powerOffAtZero = parseBoolean(nextConfig.powerOffAtZero, gyroBulbControl.powerOffAtZero);
@@ -284,6 +343,8 @@ function publicGyroBulbControl() {
     minBrightnessDelta: gyroBulbControl.minBrightnessDelta,
     transitionMs: gyroBulbControl.transitionMs,
     powerOffAtZero: gyroBulbControl.powerOffAtZero,
+    inFlight: gyroBulbControl.inFlight,
+    pendingBrightness: gyroBulbControl.pending?.brightness ?? null,
     smoothedAxis: gyroBulbControl.smoothedAxis,
     lastBrightness: gyroBulbControl.lastBrightness,
     lastResult: gyroBulbControl.lastResult,
