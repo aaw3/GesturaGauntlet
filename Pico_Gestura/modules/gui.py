@@ -16,12 +16,9 @@ class GauntletGUI:
         state = self._store.snapshot()
         self.oled.fill(0) 
         
-        # Top Status Bar
-        conn_text = "WIFI: OK" if state["connected"] else "WIFI: X"
-        self.oled.text(conn_text, 0, 0)
-        
+        # Top Status Bar        
         mode = state["mode"].upper()
-        self.oled.text(f"MODE: {mode}", 0, 10)
+        self.oled.text(f"MODE: {mode}", 0, 0)
         
         # -----------------------------------------
         # ACTION CENTER (Rows 25-40)
