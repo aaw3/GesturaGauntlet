@@ -5,15 +5,21 @@ import { Power, Zap, Shield } from "lucide-react";
 interface SystemStatusPanelProps {
   activeMode: "active" | "passive" | null;
   onModeChange: (mode: "active" | "passive") => void;
+  onRefresh?: () => void;
 }
 
-export function SystemStatusPanel({ activeMode, onModeChange }: SystemStatusPanelProps) {
+export function SystemStatusPanel({ activeMode, onModeChange, onRefresh }: SystemStatusPanelProps) {
   return (
     <div className="rounded-xl border border-border bg-gradient-to-br from-card to-card/80 p-6 ring-1 ring-primary/5">
       <div className="mb-6 flex items-center gap-2">
         <Power className="h-5 w-5 text-primary" />
         <h2 className="font-semibold text-card-foreground">System Status</h2>
-        <span className="ml-auto rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">Control Panel</span>
+        <button 
+          onClick={onRefresh}
+          className="ml-auto rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary hover:bg-primary/20 transition-colors"
+        >
+          Sync State
+        </button>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">

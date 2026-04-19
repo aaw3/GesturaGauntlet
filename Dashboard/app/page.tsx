@@ -15,7 +15,7 @@ export default function Dashboard() {
   // Changed from picoIp to brokerUrl (pointing to your Node.js server)
   const [brokerUrl, setBrokerUrl] = useState("http://localhost:3001");
   const [networkStatus, setNetworkStatus] = useState<"connected" | "disconnected" | "unknown">("unknown");
-  const [activeMode, setActiveMode] = useState<"active" | "passive" | null>(null);
+  const [activeMode, setActiveMode] = useState<"active" | "passive" | null>("passive");
   const [isSimulating, setIsSimulating] = useState(false);
   const [sensorData, setSensorData] = useState({ x: 0, y: 0, z: 0, gx: 0, gy: 0, gz: 0 });
 
@@ -26,6 +26,7 @@ export default function Dashboard() {
 
     socket.on("connect", () => {
       setNetworkStatus("connected");
+      socket.emit("getMode");
     });
 
     socket.on("disconnect", () => {
@@ -34,7 +35,10 @@ export default function Dashboard() {
 
     // Update UI when the server confirms a mode change
     socket.on("modeUpdate", (newMode) => {
-      setActiveMode(newMode);
+      console.log("Received mode update from server:", newMode);
+      if (newMode) {
+        setActiveMode(newMode.toLowerCase() as "active" | "passive");
+      }
     });
 
     // Firehose of data from the Pico
@@ -61,8 +65,15 @@ export default function Dashboard() {
   // --- 2. EMIT ACTIONS TO SERVER ---
   const handleModeChange = (mode: "active" | "passive") => {
     if (socket && socket.connected) {
+      console.log("Emitting setMode:", mode);
       socket.emit("setMode", mode);
-      // We don't manually setActiveMode here; we wait for the server's 'modeUpdate' broadcast
+    }
+  };
+
+  const handleRefresh = () => {
+    if (socket && socket.connected) {
+      console.log("Requesting state sync...");
+      socket.emit("getMode");
     }
   };
 
@@ -134,6 +145,7 @@ export default function Dashboard() {
             <SystemStatusPanel
               activeMode={activeMode}
               onModeChange={handleModeChange}
+              onRefresh={handleRefresh}
             />
           </div>
 
