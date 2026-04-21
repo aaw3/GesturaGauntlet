@@ -76,13 +76,21 @@ async def network_task(gui, store):
                 # focus scoring, and Kasa light control.
                 state = store.snapshot()
                 payload = ujson.dumps({
+<<<<<<< HEAD
+=======
+                    "mode": state.get("mode", "UNKNOWN"),
+>>>>>>> kasa_backend
                     "x": state.get("accel_x", 0.0),
                     "y": state.get("accel_y", 0.0),
                     "z": state.get("accel_z", 0.0),
                     "gx": state.get("gyro_x", 0.0),
                     "gy": state.get("gyro_y", 0.0),
+<<<<<<< HEAD
                     "gz": state.get("gyro_z", 0.0),
                     "pressure": state.get("pressure", 0.0)
+=======
+                    "gz": state.get("gyro_z", 0.0)
+>>>>>>> kasa_backend
                 }).encode("utf-8")
                 mqtt_client.publish(b"gauntlet/sensors", payload)
 
