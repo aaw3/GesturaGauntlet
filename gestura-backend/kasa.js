@@ -1,8 +1,8 @@
 /**
  * kasa.js - Gestura Gauntlet Kasa Device Manager
  *
- * Lazy-connects to Kasa devices and exposes small, safe helpers for plug,
- * bulb, presets, status, and live sensor-driven brightness control.
+ * Lazy-connects to Kasa devices and exposes safe helpers for plug control,
+ * multi-bulb state changes, presets, status reporting, and live updates.
  */
 
 const { Client } = require('tplink-smarthome-api');
@@ -11,9 +11,9 @@ const kasaClient = new Client();
 const KASA_TIMEOUT_MS = Math.max(1000, Number(process.env.KASA_TIMEOUT_MS || 4000));
 
 let plug = null;
-let bulb = null;
-let lastBulbState = {};
-let bulbQueue = Promise.resolve();
+const bulbs = new Map();
+const bulbQueues = new Map();
+const lastBulbStateByHost = new Map();
 
 const BULB_PRESETS = Object.freeze({
   focused: {
@@ -56,6 +56,51 @@ function clampPercent(value) {
   return Math.round(clamp(value, 0, 100));
 }
 
+function uniqueHosts(values) {
+  const result = [];
+  const seen = new Set();
+
+  for (const value of values) {
+    const host = String(value || '').trim();
+    if (!host || seen.has(host)) continue;
+    seen.add(host);
+    result.push(host);
+  }
+
+  return result;
+}
+
+function getBulbHosts() {
+  const hosts = [];
+
+  if (process.env.BULB_IP) {
+    hosts.push(process.env.BULB_IP);
+  }
+
+  if (process.env.BULB_IPS) {
+    hosts.push(
+      ...String(process.env.BULB_IPS)
+        .split(/[,\s]+/)
+        .map((value) => value.trim())
+        .filter(Boolean)
+    );
+  }
+
+  return uniqueHosts(hosts);
+}
+
+function getPrimaryBulbHost() {
+  return getBulbHosts()[0] || null;
+}
+
+function resolveBulbHost(host) {
+  const resolvedHost = String(host || '').trim() || getPrimaryBulbHost();
+  if (!resolvedHost) {
+    throw new Error('No bulb IPs are configured. Set BULB_IP or BULB_IPS in .env');
+  }
+  return resolvedHost;
+}
+
 /** Map an axis value to percent. Default mapping: -1 => 0%, +1 => 100%. */
 function axisToPercent(value, min = -1, max = 1) {
   const low = Number(min);
@@ -69,9 +114,12 @@ function axisToPercent(value, min = -1, max = 1) {
   return clampPercent(percent);
 }
 
-function queueBulbCommand(task) {
-  bulbQueue = bulbQueue.then(task, task);
-  return bulbQueue;
+function queueBulbCommand(host, task) {
+  const resolvedHost = resolveBulbHost(host);
+  const currentQueue = bulbQueues.get(resolvedHost) || Promise.resolve();
+  const nextQueue = currentQueue.then(task, task);
+  bulbQueues.set(resolvedHost, nextQueue.catch(() => {}));
+  return nextQueue;
 }
 
 function withTimeout(label, operation, timeoutMs = KASA_TIMEOUT_MS) {
@@ -89,6 +137,19 @@ function withTimeout(label, operation, timeoutMs = KASA_TIMEOUT_MS) {
   });
 }
 
+function clearBulbConnection(host) {
+  bulbs.delete(host);
+}
+
+function blankBulbStatus(host) {
+  return {
+    host,
+    configured: Boolean(host),
+    connected: Boolean(bulbs.get(host)),
+    lastState: lastBulbStateByHost.get(host) || {},
+  };
+}
+
 async function getPlug() {
   if (plug) return plug;
   if (!process.env.PLUG_IP) throw new Error('PLUG_IP is not set in .env');
@@ -102,30 +163,33 @@ async function getPlug() {
   return plug;
 }
 
-async function getBulb() {
-  if (bulb) return bulb;
-  if (!process.env.BULB_IP) throw new Error('BULB_IP is not set in .env');
+async function getBulb(host) {
+  const resolvedHost = resolveBulbHost(host);
+  if (bulbs.has(resolvedHost)) return bulbs.get(resolvedHost);
 
-  console.log(`[Kasa] Connecting to bulb at ${process.env.BULB_IP}...`);
-  bulb = await withTimeout(
-    `Connecting to bulb at ${process.env.BULB_IP}`,
-    () => kasaClient.getDevice({ host: process.env.BULB_IP })
+  console.log(`[Kasa] Connecting to bulb at ${resolvedHost}...`);
+  const bulb = await withTimeout(
+    `Connecting to bulb at ${resolvedHost}`,
+    () => kasaClient.getDevice({ host: resolvedHost })
   );
-  console.log(`[Kasa] Bulb connected: "${bulb.alias}"`);
+  bulbs.set(resolvedHost, bulb);
+  console.log(`[Kasa] Bulb connected [${resolvedHost}]: "${bulb.alias}"`);
   return bulb;
 }
 
 function resetConnections() {
   plug = null;
-  bulb = null;
-  lastBulbState = {};
+  bulbs.clear();
+  bulbQueues.clear();
+  lastBulbStateByHost.clear();
   return { success: true };
 }
 
 async function getDeviceStatus() {
   const status = {
     plug: { configured: Boolean(process.env.PLUG_IP), connected: Boolean(plug) },
-    bulb: { configured: Boolean(process.env.BULB_IP), connected: Boolean(bulb), lastState: lastBulbState },
+    bulb: { configured: false, connected: false, lastState: {} },
+    bulbs: [],
   };
 
   try {
@@ -145,21 +209,30 @@ async function getDeviceStatus() {
     status.plug.error = err.message;
   }
 
-  try {
-    if (process.env.BULB_IP) {
-      const device = await getBulb();
-      status.bulb.connected = true;
-      status.bulb.alias = device.alias;
-      if (typeof device.getSysInfo === 'function') {
-        status.bulb.sysInfo = await withTimeout(
-          'Fetching bulb sysInfo',
-          () => device.getSysInfo()
-        );
+  const bulbHosts = getBulbHosts();
+  status.bulbs = await Promise.all(
+    bulbHosts.map(async (host) => {
+      const bulbStatus = blankBulbStatus(host);
+      try {
+        const device = await getBulb(host);
+        bulbStatus.connected = true;
+        bulbStatus.alias = device.alias;
+        if (typeof device.getSysInfo === 'function') {
+          bulbStatus.sysInfo = await withTimeout(
+            `Fetching bulb sysInfo from ${host}`,
+            () => device.getSysInfo()
+          );
+        }
+      } catch (err) {
+        clearBulbConnection(host);
+        bulbStatus.error = err.message;
       }
-    }
-  } catch (err) {
-    bulb = null;
-    status.bulb.error = err.message;
+      return bulbStatus;
+    })
+  );
+
+  if (status.bulbs[0]) {
+    status.bulb = status.bulbs[0];
   }
 
   return status;
@@ -182,10 +255,17 @@ async function setPlugPower(state) {
   }
 }
 
-async function setBulbState(lightState = {}) {
-  return queueBulbCommand(async () => {
+async function setBulbState(lightState = {}, options = {}) {
+  let resolvedHost;
+  try {
+    resolvedHost = resolveBulbHost(options.host);
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+
+  return queueBulbCommand(resolvedHost, async () => {
     try {
-      const device = await getBulb();
+      const device = await getBulb(resolvedHost);
       const nextState = { ...lightState };
       for (const key of Object.keys(nextState)) {
         if (nextState[key] === undefined) delete nextState[key];
@@ -208,29 +288,60 @@ async function setBulbState(lightState = {}) {
             : Math.round(clamp(requestedColorTemp, 2500, 9000));
       }
       if (nextState.transition_period !== undefined) {
-        nextState.transition_period = Math.round(clamp(nextState.transition_period, 0, 60_000));
+        nextState.transition_period = Math.round(
+          clamp(nextState.transition_period, 0, 60_000)
+        );
       }
 
       await withTimeout(
-        `Applying bulb state to ${process.env.BULB_IP}`,
+        `Applying bulb state to ${resolvedHost}`,
         () => device.lighting.setLightState(nextState)
       );
-      lastBulbState = { ...lastBulbState, ...nextState, updatedAt: new Date().toISOString() };
-      console.log('[Kasa] Bulb state updated:', nextState);
-      return { success: true, lightState: nextState };
+
+      const lastState = {
+        ...(lastBulbStateByHost.get(resolvedHost) || {}),
+        ...nextState,
+        updatedAt: new Date().toISOString(),
+      };
+      lastBulbStateByHost.set(resolvedHost, lastState);
+
+      console.log(`[Kasa] Bulb state updated [${resolvedHost}]:`, nextState);
+      return { success: true, host: resolvedHost, lightState: nextState };
     } catch (err) {
-      bulb = null;
-      console.error(`[Kasa] Bulb error: ${err.message}`);
-      return { success: false, error: err.message };
+      clearBulbConnection(resolvedHost);
+      console.error(`[Kasa] Bulb ${resolvedHost} error: ${err.message}`);
+      return { success: false, host: resolvedHost, error: err.message };
     }
   });
 }
 
+async function setBulbsState(lightState = {}, options = {}) {
+  const hosts = uniqueHosts(
+    Array.isArray(options.hosts) && options.hosts.length ? options.hosts : getBulbHosts()
+  );
+
+  if (!hosts.length) {
+    return { success: false, error: 'No bulb IPs are configured. Set BULB_IP or BULB_IPS in .env', results: [] };
+  }
+
+  const results = await Promise.all(
+    hosts.map((host) => setBulbState(lightState, { ...options, host }))
+  );
+
+  return {
+    success: results.every((result) => result.success),
+    results,
+  };
+}
+
 async function setBulbPower(state, options = {}) {
-  return setBulbState({
-    on_off: state ? 1 : 0,
-    transition_period: options.transitionMs,
-  });
+  return setBulbState(
+    {
+      on_off: state ? 1 : 0,
+      transition_period: options.transitionMs,
+    },
+    options
+  );
 }
 
 async function setBulbBrightness(brightness, options = {}) {
@@ -246,7 +357,7 @@ async function setBulbBrightness(brightness, options = {}) {
     lightState.on_off = 1;
   }
 
-  return setBulbState(lightState);
+  return setBulbState(lightState, options);
 }
 
 async function setBulbBrightnessFromAxis(axisValue, options = {}) {
@@ -259,53 +370,65 @@ async function setBulbBrightnessFromAxis(axisValue, options = {}) {
   return { ...result, axisValue: Number(axisValue), brightness };
 }
 
-async function setBulbColor({ hue, saturation = 100, brightness, transitionMs } = {}) {
-  return setBulbState({
-    on_off: 1,
-    hue,
-    saturation,
-    color_temp: 0,
-    brightness,
-    transition_period: transitionMs,
-  });
+async function setBulbColor(
+  { hue, saturation = 100, brightness, transitionMs } = {},
+  options = {}
+) {
+  return setBulbState(
+    {
+      on_off: 1,
+      hue,
+      saturation,
+      color_temp: 0,
+      brightness,
+      transition_period: transitionMs,
+    },
+    options
+  );
 }
 
 async function setBulbColorTemperature(colorTemp, options = {}) {
-  return setBulbState({
-    on_off: options.turnOn === false ? undefined : 1,
-    color_temp: colorTemp,
-    brightness: options.brightness,
-    transition_period: options.transitionMs,
-  });
+  return setBulbState(
+    {
+      on_off: options.turnOn === false ? undefined : 1,
+      color_temp: colorTemp,
+      brightness: options.brightness,
+      transition_period: options.transitionMs,
+    },
+    options
+  );
 }
 
-async function applyPreset(name) {
+async function applyPreset(name, options = {}) {
   const preset = BULB_PRESETS[String(name).toLowerCase()];
   if (!preset) {
     return { success: false, error: `Unknown preset: ${name}` };
   }
-  return setBulbState(preset);
+  return setBulbState(preset, options);
 }
 
-async function applyFocusedPreset() {
-  return applyPreset('focused');
+async function applyFocusedPreset(options = {}) {
+  return applyPreset('focused', options);
 }
 
-async function applyBreakPreset() {
-  return applyPreset('break');
+async function applyBreakPreset(options = {}) {
+  return applyPreset('break', options);
 }
 
-async function applyAlertPreset() {
-  return applyPreset('alert');
+async function applyAlertPreset(options = {}) {
+  return applyPreset('alert', options);
 }
 
 module.exports = {
   BULB_PRESETS,
   axisToPercent,
+  getBulbHosts,
+  getPrimaryBulbHost,
   resetConnections,
   getDeviceStatus,
   setPlugPower,
   setBulbState,
+  setBulbsState,
   setBulbPower,
   setBulbBrightness,
   setBulbBrightnessFromAxis,

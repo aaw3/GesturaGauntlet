@@ -106,6 +106,14 @@ const PASSIVE_MOTION_STILL_THRESHOLD = Number(
 );
 const PASSIVE_MOTION_BRIGHTNESS = Number(process.env.PASSIVE_MOTION_BRIGHTNESS || 100);
 const PASSIVE_MOTION_TRANSITION_MS = Number(process.env.PASSIVE_MOTION_TRANSITION_MS || 0);
+const PASSIVE_MOTION_ACCEL_DEADBAND = Math.max(
+  0,
+  Number(process.env.PASSIVE_MOTION_ACCEL_DEADBAND || 0.005)
+);
+const PASSIVE_MOTION_GYRO_DEADBAND_DPS = Math.max(
+  0,
+  Number(process.env.PASSIVE_MOTION_GYRO_DEADBAND_DPS || 12)
+);
 const PASSIVE_DEBUG_LOG_ENABLED =
   String(process.env.PASSIVE_DEBUG_LOG_ENABLED || 'true') !== 'false';
 const PASSIVE_DEBUG_LOG_INTERVAL_MS = Math.max(
@@ -116,8 +124,17 @@ const PASSIVE_SENSOR_STALE_MS = Math.max(
   500,
   Number(process.env.PASSIVE_SENSOR_STALE_MS || 2000)
 );
+const DEFAULT_PASSIVE_STILL_COLOR = normalizeHexColor(
+  process.env.PASSIVE_MOTION_STILL_COLOR,
+  '#ff0000'
+);
+const DEFAULT_PASSIVE_MOVING_COLOR = normalizeHexColor(
+  process.env.PASSIVE_MOTION_MOVING_COLOR,
+  '#00ff00'
+);
 
 const passiveMotionWindow = [];
+const passiveBulbConfigs = new Map();
 const passiveMotion = {
   lastSample: null,
   state: null,
@@ -130,6 +147,8 @@ const passiveMotion = {
   lastMotionScore: 0,
   lastAccelDelta: 0,
   lastGyroMagnitude: 0,
+  lastEffectiveAccelDelta: 0,
+  lastEffectiveGyroMagnitude: 0,
   lastSource: null,
   lastSensorAt: 0,
   lastTelemetryLogAt: 0,
@@ -213,16 +232,135 @@ function updateFocusScore(variance) {
   return Math.round(focusScore);
 }
 
-function passiveColorForState(state) {
-  if (state === 'moving') return 'GREEN';
-  if (state === 'still') return 'RED';
-  return 'NONE';
+function normalizeHexColor(value, fallback = '#ffffff') {
+  let hex = String(value || '').trim().toLowerCase();
+  if (!hex) return fallback;
+  if (!hex.startsWith('#')) hex = `#${hex}`;
+  if (/^#[0-9a-f]{3}$/i.test(hex)) {
+    hex = `#${hex
+      .slice(1)
+      .split('')
+      .map((char) => char + char)
+      .join('')}`;
+  }
+  if (!/^#[0-9a-f]{6}$/i.test(hex)) return fallback;
+  return hex;
+}
+
+function hexToRgb(hex) {
+  const normalized = normalizeHexColor(hex, '');
+  const value = normalized.slice(1);
+  return {
+    r: parseInt(value.slice(0, 2), 16),
+    g: parseInt(value.slice(2, 4), 16),
+    b: parseInt(value.slice(4, 6), 16),
+  };
+}
+
+function rgbToKasaColor({ r, g, b }) {
+  const red = r / 255;
+  const green = g / 255;
+  const blue = b / 255;
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+  const delta = max - min;
+
+  let hue = 0;
+  if (delta !== 0) {
+    if (max === red) {
+      hue = ((green - blue) / delta) % 6;
+    } else if (max === green) {
+      hue = (blue - red) / delta + 2;
+    } else {
+      hue = (red - green) / delta + 4;
+    }
+  }
+
+  hue = Math.round(hue * 60);
+  if (hue < 0) hue += 360;
+
+  const saturation = max === 0 ? 0 : Math.round((delta / max) * 100);
+  const brightness = Math.round(max * 100);
+
+  return {
+    hue,
+    saturation,
+    brightness: Math.max(1, brightness),
+  };
+}
+
+function getPassiveBulbConfig(host) {
+  if (!host) return null;
+
+  if (!passiveBulbConfigs.has(host)) {
+    passiveBulbConfigs.set(host, {
+      host,
+      stillColor: DEFAULT_PASSIVE_STILL_COLOR,
+      movingColor: DEFAULT_PASSIVE_MOVING_COLOR,
+    });
+  }
+
+  return passiveBulbConfigs.get(host);
+}
+
+function getPassiveBulbConfigs() {
+  return kasa
+    .getBulbHosts()
+    .map((host) => getPassiveBulbConfig(host))
+    .filter(Boolean);
+}
+
+function passiveHexForState(host, state) {
+  const config = getPassiveBulbConfig(host);
+  if (!config) return state === 'moving' ? DEFAULT_PASSIVE_MOVING_COLOR : DEFAULT_PASSIVE_STILL_COLOR;
+  return state === 'moving' ? config.movingColor : config.stillColor;
+}
+
+function publicPassiveColorConfig(kasaStatus = null) {
+  const bulbStatusByHost = new Map(
+    (kasaStatus?.bulbs || []).map((bulb) => [bulb.host, bulb])
+  );
+
+  return {
+    defaults: {
+      stillColor: DEFAULT_PASSIVE_STILL_COLOR,
+      movingColor: DEFAULT_PASSIVE_MOVING_COLOR,
+    },
+    devices: getPassiveBulbConfigs().map((config) => {
+      const bulbStatus = bulbStatusByHost.get(config.host);
+      return {
+        ...config,
+        alias: bulbStatus?.alias || config.host,
+        connected: bulbStatus?.connected ?? false,
+        error: bulbStatus?.error,
+      };
+    }),
+  };
+}
+
+function updatePassiveColorConfig(nextConfig = {}) {
+  const host = String(nextConfig.host || '').trim();
+  if (!host) {
+    throw new Error('host is required');
+  }
+
+  const config = getPassiveBulbConfig(host);
+  config.stillColor = normalizeHexColor(nextConfig.stillColor, config.stillColor);
+  config.movingColor = normalizeHexColor(nextConfig.movingColor, config.movingColor);
+  passiveBulbConfigs.set(host, config);
+  return config;
 }
 
 function computePassiveMotionMetrics(sensor) {
   if (!passiveMotion.lastSample) {
     passiveMotion.lastSample = sensor;
-    return { score: 0, accelDelta: 0, gyroMagnitude: 0 };
+    return {
+      score: 0,
+      accelDelta: 0,
+      gyroMagnitude: 0,
+      effectiveAccelDelta: 0,
+      effectiveGyroMagnitude: 0,
+    };
   }
 
   const prev = passiveMotion.lastSample;
@@ -235,11 +373,18 @@ function computePassiveMotionMetrics(sensor) {
   );
   const gyroMagnitude =
     Math.sqrt(sensor.gx ** 2 + sensor.gy ** 2 + sensor.gz ** 2) / 250;
+  const effectiveAccelDelta = Math.max(0, accelDelta - PASSIVE_MOTION_ACCEL_DEADBAND);
+  const effectiveGyroMagnitude = Math.max(
+    0,
+    gyroMagnitude - PASSIVE_MOTION_GYRO_DEADBAND_DPS / 250
+  );
 
   return {
-    score: accelDelta + gyroMagnitude * 0.5,
+    score: effectiveAccelDelta + effectiveGyroMagnitude * 0.5,
     accelDelta,
     gyroMagnitude,
+    effectiveAccelDelta,
+    effectiveGyroMagnitude,
   };
 }
 
@@ -251,6 +396,10 @@ function publicPassiveMotionState() {
     rawMotionScore: Number(passiveMotion.lastMotionScore.toFixed(4)),
     accelDelta: Number(passiveMotion.lastAccelDelta.toFixed(4)),
     gyroMagnitude: Number(passiveMotion.lastGyroMagnitude.toFixed(4)),
+    effectiveAccelDelta: Number(passiveMotion.lastEffectiveAccelDelta.toFixed(4)),
+    effectiveGyroMagnitude: Number(passiveMotion.lastEffectiveGyroMagnitude.toFixed(4)),
+    accelDeadband: PASSIVE_MOTION_ACCEL_DEADBAND,
+    gyroDeadbandDps: PASSIVE_MOTION_GYRO_DEADBAND_DPS,
     movingThreshold: PASSIVE_MOTION_MOVING_THRESHOLD,
     stillThreshold: PASSIVE_MOTION_STILL_THRESHOLD,
     windowSize: PASSIVE_MOTION_WINDOW_SIZE,
@@ -277,7 +426,8 @@ function logPassiveTelemetry(sensor) {
       `raw=${passiveMotion.lastMotionScore.toFixed(4)} ` +
       `applied=${passiveMotion.lastAppliedState ?? 'unknown'} ` +
       `inFlight=${passiveMotion.commandInFlight} pending=${passiveMotion.pendingState ?? 'none'} ` +
-      `dA=${passiveMotion.lastAccelDelta.toFixed(4)} gMag=${passiveMotion.lastGyroMagnitude.toFixed(4)} ` +
+      `dA=${passiveMotion.lastAccelDelta.toFixed(4)} eA=${passiveMotion.lastEffectiveAccelDelta.toFixed(4)} ` +
+      `gMag=${passiveMotion.lastGyroMagnitude.toFixed(4)} eG=${passiveMotion.lastEffectiveGyroMagnitude.toFixed(4)} ` +
       `xyz=(${sensor.x.toFixed(3)},${sensor.y.toFixed(3)},${sensor.z.toFixed(3)}) ` +
       `gyro=(${sensor.gx.toFixed(3)},${sensor.gy.toFixed(3)},${sensor.gz.toFixed(3)})`
   );
@@ -289,6 +439,8 @@ function updatePassiveMotionState(sensor, source = 'unknown') {
   passiveMotion.lastMotionScore = motion.score;
   passiveMotion.lastAccelDelta = motion.accelDelta;
   passiveMotion.lastGyroMagnitude = motion.gyroMagnitude;
+  passiveMotion.lastEffectiveAccelDelta = motion.effectiveAccelDelta;
+  passiveMotion.lastEffectiveGyroMagnitude = motion.effectiveGyroMagnitude;
   passiveMotion.lastSource = source;
   passiveMotion.lastSensorAt = Date.now();
   passiveMotion.staleWarned = false;
@@ -322,7 +474,8 @@ function updatePassiveMotionState(sensor, source = 'unknown') {
   console.log(
     `[Passive] ${nextState.toUpperCase()} avg=${averagedScore.toFixed(4)} ` +
       `raw=${motion.score.toFixed(4)} dA=${motion.accelDelta.toFixed(4)} ` +
-      `gMag=${motion.gyroMagnitude.toFixed(4)}`
+      `eA=${motion.effectiveAccelDelta.toFixed(4)} gMag=${motion.gyroMagnitude.toFixed(4)} ` +
+      `eG=${motion.effectiveGyroMagnitude.toFixed(4)}`
   );
   io.emit('passiveMotionState', publicPassiveMotionState());
   return true;
@@ -343,30 +496,59 @@ async function syncPassiveMotionBulb(force = false) {
 
   passiveMotion.commandInFlight = true;
   passiveMotion.pendingState = null;
-
-  const isMoving = desiredState === 'moving';
-  const color = passiveColorForState(desiredState);
-  console.log(
-    `[Passive] Bulb command -> ${color} state=${desiredState} avg=${passiveMotion.score.toFixed(4)} ` +
-      `raw=${passiveMotion.lastMotionScore.toFixed(4)} applied=${passiveMotion.lastAppliedState ?? 'unknown'}`
-  );
+  const bulbConfigs = getPassiveBulbConfigs();
 
   try {
-    const result = await kasa.setBulbColor({
-      hue: isMoving ? 120 : 0,
-      saturation: 100,
-      brightness: PASSIVE_MOTION_BRIGHTNESS,
-      transitionMs: PASSIVE_MOTION_TRANSITION_MS,
-    });
-
-    if (result.success) {
+    if (!bulbConfigs.length) {
       passiveMotion.lastAppliedState = desiredState;
-      passiveMotion.lastColor = color;
-      console.log(`[Passive] Bulb -> ${color}`);
+      passiveMotion.lastColor = 'NONE';
     } else {
-      passiveMotion.lastAppliedState = null;
-      passiveMotion.lastColor = 'ERROR';
-      console.error(`[Passive] Bulb command failed for ${color}: ${result.error}`);
+      const results = await Promise.all(
+        bulbConfigs.map(async (bulbConfig) => {
+          const hexColor = passiveHexForState(bulbConfig.host, desiredState);
+          const kasaColor = rgbToKasaColor(hexToRgb(hexColor));
+          kasaColor.brightness = Math.max(
+            1,
+            Math.min(PASSIVE_MOTION_BRIGHTNESS, kasaColor.brightness)
+          );
+
+          console.log(
+            `[Passive] Bulb command [${bulbConfig.host}] -> ${hexColor} state=${desiredState} ` +
+              `avg=${passiveMotion.score.toFixed(4)} raw=${passiveMotion.lastMotionScore.toFixed(4)}`
+          );
+
+          const result = await kasa.setBulbColor(
+            {
+              hue: kasaColor.hue,
+              saturation: kasaColor.saturation,
+              brightness: kasaColor.brightness,
+              transitionMs: PASSIVE_MOTION_TRANSITION_MS,
+            },
+            { host: bulbConfig.host }
+          );
+
+          return {
+            host: bulbConfig.host,
+            alias: bulbConfig.alias || bulbConfig.host,
+            hexColor,
+            result,
+          };
+        })
+      );
+
+      const allSucceeded = results.every((entry) => entry.result.success);
+      passiveMotion.lastAppliedState = allSucceeded ? desiredState : null;
+      passiveMotion.lastColor = results[0]?.hexColor || 'NONE';
+
+      for (const entry of results) {
+        if (entry.result.success) {
+          console.log(`[Passive] Bulb [${entry.host}] -> ${entry.hexColor}`);
+        } else {
+          console.error(
+            `[Passive] Bulb command failed for ${entry.host} (${entry.hexColor}): ${entry.result.error}`
+          );
+        }
+      }
     }
   } finally {
     passiveMotion.commandInFlight = false;
@@ -399,7 +581,9 @@ async function applyModeOutputs() {
   }
 
   passiveMotion.lastAppliedState = null;
-  await kasa.applyFocusedPreset();
+  await Promise.all(
+    kasa.getBulbHosts().map((host) => kasa.applyFocusedPreset({ host }))
+  );
 }
 
 function isGyroBulbControlActive() {
@@ -717,23 +901,47 @@ io.on('connection', (socket) => {
     socket.emit('plugResult', result);
   });
 
-  socket.on('setBulb', async (lightState) => {
-    const result = await kasa.setBulbState(lightState);
+  socket.on('setBulb', async (payload = {}) => {
+    const { host, ...lightState } = payload;
+    const result = await kasa.setBulbState(lightState, { host });
     socket.emit('bulbResult', result);
   });
 
-  socket.on('setBulbBrightness', async ({ brightness, transitionMs } = {}) => {
-    const result = await kasa.setBulbBrightness(brightness, { transitionMs });
+  socket.on('setBulbBrightness', async ({ host, brightness, transitionMs } = {}) => {
+    const result = await kasa.setBulbBrightness(brightness, { host, transitionMs });
     socket.emit('bulbResult', result);
   });
 
-  socket.on('applyBulbPreset', async ({ preset } = {}) => {
-    const result = await kasa.applyPreset(preset);
+  socket.on('applyBulbPreset', async ({ host, preset } = {}) => {
+    const result = await kasa.applyPreset(preset, { host });
     socket.emit('bulbResult', result);
   });
 
   socket.on('getKasaStatus', async () => {
     socket.emit('kasaStatus', await kasa.getDeviceStatus());
+  });
+
+  socket.on('getPassiveColorConfig', async () => {
+    const kasaStatus = await kasa.getDeviceStatus();
+    socket.emit('passiveColorConfig', publicPassiveColorConfig(kasaStatus));
+  });
+
+  socket.on('setPassiveColorConfig', async (config = {}) => {
+    try {
+      updatePassiveColorConfig(config);
+      if (currentMode === 'passive') {
+        passiveMotion.lastAppliedState = null;
+        await syncPassiveMotionBulb(true);
+        io.emit('passiveMotionState', publicPassiveMotionState());
+      }
+
+      const kasaStatus = await kasa.getDeviceStatus();
+      const payload = publicPassiveColorConfig(kasaStatus);
+      io.emit('passiveColorConfig', payload);
+      socket.emit('passiveColorConfigResult', { success: true, passiveColorConfig: payload });
+    } catch (err) {
+      socket.emit('passiveColorConfigResult', { success: false, error: err.message });
+    }
   });
 
   socket.on('sendMessage', (message) => {
@@ -767,6 +975,7 @@ app.get('/api/status', (req, res) => {
     sensor: liveSensorState,
     gyroBulbControl: publicGyroBulbControl(),
     passiveMotion: publicPassiveMotionState(),
+    passiveColorConfig: publicPassiveColorConfig(),
   });
 });
 
@@ -802,12 +1011,14 @@ app.post('/api/kasa/plug', async (req, res) => {
 });
 
 app.post('/api/kasa/bulb', async (req, res) => {
-  res.json(await kasa.setBulbState(req.body || {}));
+  const { host, ...lightState } = req.body || {};
+  res.json(await kasa.setBulbState(lightState, { host }));
 });
 
 app.post('/api/kasa/bulb/brightness', async (req, res) => {
   res.json(
     await kasa.setBulbBrightness(req.body?.brightness, {
+      host: req.body?.host,
       transitionMs: req.body?.transitionMs,
       powerOffAtZero: req.body?.powerOffAtZero,
     })
@@ -817,6 +1028,7 @@ app.post('/api/kasa/bulb/brightness', async (req, res) => {
 app.post('/api/kasa/bulb/axis', async (req, res) => {
   res.json(
     await kasa.setBulbBrightnessFromAxis(req.body?.value, {
+      host: req.body?.host,
       axisMin: req.body?.axisMin ?? -1,
       axisMax: req.body?.axisMax ?? 1,
       transitionMs: req.body?.transitionMs,
@@ -826,7 +1038,30 @@ app.post('/api/kasa/bulb/axis', async (req, res) => {
 });
 
 app.post('/api/kasa/bulb/preset', async (req, res) => {
-  res.json(await kasa.applyPreset(req.body?.preset));
+  res.json(await kasa.applyPreset(req.body?.preset, { host: req.body?.host }));
+});
+
+app.get('/api/passive-config', async (req, res) => {
+  const kasaStatus = await kasa.getDeviceStatus();
+  res.json(publicPassiveColorConfig(kasaStatus));
+});
+
+app.post('/api/passive-config', async (req, res) => {
+  try {
+    updatePassiveColorConfig(req.body || {});
+    if (currentMode === 'passive') {
+      passiveMotion.lastAppliedState = null;
+      await syncPassiveMotionBulb(true);
+      io.emit('passiveMotionState', publicPassiveMotionState());
+    }
+
+    const kasaStatus = await kasa.getDeviceStatus();
+    const payload = publicPassiveColorConfig(kasaStatus);
+    io.emit('passiveColorConfig', payload);
+    res.json({ success: true, passiveColorConfig: payload });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
 });
 
 app.get('/api/gyro-bulb-control', (req, res) => {
@@ -847,13 +1082,17 @@ server.on('error', (err) => {
 server.listen(PORT, () => {
   console.log(`[Server] Gestura Broker on http://localhost:${PORT}`);
   console.log(`[Server] Kasa Plug IP : ${process.env.PLUG_IP || 'PLUG_IP not set'}`);
-  console.log(`[Server] Kasa Bulb IP : ${process.env.BULB_IP || 'BULB_IP not set'}`);
+  console.log(
+    `[Server] Kasa Bulbs   : ${
+      kasa.getBulbHosts().join(', ') || 'BULB_IP/BULB_IPS not set'
+    }`
+  );
   console.log(
     `[Server] Gyro bulb   : ${
       gyroBulbControl.enabled ? 'enabled' : 'disabled'
     } (${gyroBulbControl.axis} ${gyroBulbControl.axisMin}..${gyroBulbControl.axisMax} -> 0..100%, mode=${gyroBulbControl.mode})`
   );
   console.log(
-    `[Server] Passive bulb: red=still, green=moving (window=${PASSIVE_MOTION_WINDOW_SIZE}, thresholds=${PASSIVE_MOTION_STILL_THRESHOLD}/${PASSIVE_MOTION_MOVING_THRESHOLD})`
+    `[Server] Passive bulb: customizable per device (defaults still=${DEFAULT_PASSIVE_STILL_COLOR}, moving=${DEFAULT_PASSIVE_MOVING_COLOR}, window=${PASSIVE_MOTION_WINDOW_SIZE}, thresholds=${PASSIVE_MOTION_STILL_THRESHOLD}/${PASSIVE_MOTION_MOVING_THRESHOLD})`
   );
 });

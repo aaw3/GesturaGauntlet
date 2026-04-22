@@ -6,10 +6,22 @@ import { SystemStatusPanel } from "@/components/dashboard/system-status-panel";
 import { NetworkStatusIndicator } from "@/components/dashboard/network-status-indicator";
 import { LiveSensorData } from "@/components/dashboard/live-sensor-data";
 import { OledMessagePanel } from "@/components/dashboard/oled-message-panel";
+import {
+  PassiveBulbConfigDevice,
+  PassiveBulbConfigPanel,
+} from "@/components/dashboard/passive-bulb-config-panel";
 import { Hand, Activity } from "lucide-react";
 
 // Declare socket outside to prevent constant reconnections on UI renders
 let socket: Socket;
+
+interface PassiveColorConfigPayload {
+  devices: PassiveBulbConfigDevice[];
+  defaults: {
+    stillColor: string;
+    movingColor: string;
+  };
+}
 
 export default function Dashboard() {
   // Changed from picoIp to brokerUrl (pointing to your Node.js server)
@@ -18,6 +30,9 @@ export default function Dashboard() {
   const [activeMode, setActiveMode] = useState<"active" | "passive" | null>("passive");
   const [isSimulating, setIsSimulating] = useState(false);
   const [sensorData, setSensorData] = useState({ x: 0, y: 0, z: 0, gx: 0, gy: 0, gz: 0 });
+  const [passiveBulbs, setPassiveBulbs] = useState<PassiveBulbConfigDevice[]>([]);
+  const [passiveConfigError, setPassiveConfigError] = useState<string | null>(null);
+  const [savingPassiveHost, setSavingPassiveHost] = useState<string | null>(null);
 
   // --- 1. WEBSOCKET CONNECTION & LISTENERS ---
   useEffect(() => {
@@ -27,6 +42,7 @@ export default function Dashboard() {
     socket.on("connect", () => {
       setNetworkStatus("connected");
       socket.emit("getMode");
+      socket.emit("getPassiveColorConfig");
     });
 
     socket.on("disconnect", () => {
@@ -56,6 +72,17 @@ export default function Dashboard() {
       }
     });
 
+    socket.on("passiveColorConfig", (config: PassiveColorConfigPayload) => {
+      setPassiveBulbs(config?.devices || []);
+      setPassiveConfigError(null);
+    });
+
+    socket.on("passiveColorConfigResult", (result: { success: boolean; error?: string }) => {
+      if (!result?.success && result.error) {
+        setPassiveConfigError(result.error);
+      }
+    });
+
     // Cleanup on unmount
     return () => {
       if (socket) socket.disconnect();
@@ -74,12 +101,50 @@ export default function Dashboard() {
     if (socket && socket.connected) {
       console.log("Requesting state sync...");
       socket.emit("getMode");
+      socket.emit("getPassiveColorConfig");
     }
   };
 
   const handleSendMessage = (message: string) => {
     if (socket && socket.connected) {
       socket.emit("sendMessage", message); 
+    }
+  };
+
+  const handlePassiveColorSave = async (
+    host: string,
+    colors: { stillColor: string; movingColor: string }
+  ) => {
+    setSavingPassiveHost(host);
+    setPassiveConfigError(null);
+
+    try {
+      const response = await fetch(`${brokerUrl}/api/passive-config`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          host,
+          stillColor: colors.stillColor,
+          movingColor: colors.movingColor,
+        }),
+      });
+
+      const payload = await response.json();
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.error || "Failed to save passive colors.");
+      }
+
+      if (payload?.passiveColorConfig?.devices) {
+        setPassiveBulbs(payload.passiveColorConfig.devices);
+      }
+    } catch (error) {
+      setPassiveConfigError(
+        error instanceof Error ? error.message : "Failed to save passive colors."
+      );
+    } finally {
+      setSavingPassiveHost(null);
     }
   };
 
@@ -183,6 +248,16 @@ export default function Dashboard() {
                 </span>
               </div>
             </div>
+          </div>
+
+          <div className="lg:col-span-3">
+            <PassiveBulbConfigPanel
+              devices={passiveBulbs}
+              error={passiveConfigError}
+              isSavingHost={savingPassiveHost}
+              onRefresh={handleRefresh}
+              onSave={handlePassiveColorSave}
+            />
           </div>
 
           {/* Live Sensor Data - Spans 2 columns */}
