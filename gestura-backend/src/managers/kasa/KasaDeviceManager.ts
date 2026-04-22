@@ -15,6 +15,7 @@ export class KasaDeviceManager implements DeviceManager {
   constructor(
     private managerId: string,
     initialDevices: KasaDiscoveredDevice[] = [],
+    private options: { name?: string } = {},
   ) {
     this.devices = initialDevices.map((device) =>
       mapKasaDeviceToManaged(this.managerId, device),
@@ -24,7 +25,7 @@ export class KasaDeviceManager implements DeviceManager {
   async getInfo(): Promise<DeviceManagerInfo> {
     return {
       id: this.managerId,
-      name: "Kasa Manager",
+      name: this.options.name ?? "Kasa Manager",
       kind: "kasa",
       version: "1.0.0",
       online: true,

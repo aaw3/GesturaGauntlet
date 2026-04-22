@@ -8,6 +8,10 @@ export class ManagerService {
     this.managers.set(managerId, manager);
   }
 
+  unregister(managerId: string): boolean {
+    return this.managers.delete(managerId);
+  }
+
   async registerValidated(managerId: string, manager: DeviceManager) {
     const info = await manager.getInfo();
     if (info.id !== managerId) {

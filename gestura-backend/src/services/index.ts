@@ -5,7 +5,6 @@ import { ActionRouter } from "./ActionRouter";
 import { DeviceService } from "./DeviceService";
 import { DeviceSyncService } from "./DeviceSyncService";
 import { GloveStateService } from "./GloveStateService";
-import { KasaDeviceManager } from "../managers/kasa/KasaDeviceManager";
 import { ManagerService } from "./ManagerService";
 import { MappingService } from "./MappingService";
 import { SceneService } from "./SceneService";
@@ -30,8 +29,6 @@ export function createServices(): GesturaServices {
   const deviceSyncService = new DeviceSyncService(managerService, registry);
   const sceneService = new SceneService(actionRouter);
   const gloveStateService = new GloveStateService(mappingService, actionRouter);
-
-  managerService.register("kasa-main", new KasaDeviceManager("kasa-main"));
 
   const simulatorUrl = process.env.SIM_MANAGER_URL;
   if (simulatorUrl) {

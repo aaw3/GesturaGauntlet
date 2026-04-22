@@ -29,12 +29,27 @@ export interface ManagerSyncResult {
   errors: string[];
 }
 
-export interface CreateManagerRequest {
-  id: ID;
-  kind: "simulator" | "custom";
+export interface AddExternalManagerRequest {
   name: string;
   baseUrl: string;
   authToken?: string;
+}
+
+export interface CreateManagerRequest extends AddExternalManagerRequest {
+  id: ID;
+  kind: "simulator" | "custom";
+}
+
+export interface AddNativeKasaManagerRequest {
+  id?: ID;
+  name: string;
+}
+
+export interface ExternalManagerValidationResult {
+  ok: boolean;
+  managerInfo?: DeviceManagerInfo;
+  deviceCount?: number;
+  errors: string[];
 }
 
 export interface ManagerDeviceListResult {

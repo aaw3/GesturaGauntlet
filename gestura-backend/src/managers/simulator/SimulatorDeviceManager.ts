@@ -13,10 +13,33 @@ export class SimulatorDeviceManager implements DeviceManager {
   constructor(
     private managerId: string,
     private client: SimulatorClient,
-    private options: { name?: string; baseUrl?: string } = {},
+    private options: { name?: string; baseUrl?: string; managerInfo?: DeviceManagerInfo } = {},
   ) {}
 
   async getInfo(): Promise<DeviceManagerInfo> {
+    if (this.options.managerInfo) {
+      return {
+        ...this.options.managerInfo,
+        name: this.options.name ?? this.options.managerInfo.name,
+        integrationType: "external",
+        baseUrl: this.options.baseUrl ?? this.options.managerInfo.baseUrl,
+      };
+    }
+
+    try {
+      const info = await this.client.getJson<DeviceManagerInfo>("/api/manager");
+      return {
+        ...info,
+        id: info.id || this.managerId,
+        name: this.options.name ?? info.name,
+        integrationType: "external",
+        baseUrl: this.options.baseUrl ?? info.baseUrl,
+      };
+    } catch {
+      // Fall back to configured metadata so a temporarily offline external
+      // manager can still be represented in the backend manager list.
+    }
+
     return {
       id: this.managerId,
       name: this.options.name ?? "Simulator Manager",

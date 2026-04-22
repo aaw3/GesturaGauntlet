@@ -7,8 +7,12 @@ export function managerRouter(managerId: string) {
     res.json({
       id: managerId,
       name: "Simulator Manager",
+      kind: "simulator",
       version: "1.0.0",
+      online: true,
+      supportsDiscovery: false,
       supportsBulkActions: true,
+      integrationType: "external",
     });
   });
 

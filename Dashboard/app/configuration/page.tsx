@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
   Check,
@@ -12,24 +12,30 @@ import {
   Lightbulb,
   ListChecks,
   Plug,
+  Plus,
+  RefreshCw,
+  Server,
   Settings,
   SlidersHorizontal,
 } from "lucide-react";
 
 import {
   ActionMapping,
+  BackendManagedDevice,
   capabilityLibrary,
   defaultDevices,
-  defaultMapping,
   deviceKinds,
   DeviceCapability,
   DeviceDefinition,
+  DeviceManagerInfo,
   DeviceKind,
   GloveMappingContract,
+  mapBackendDeviceToDefinition,
   MappingMode,
   sourceInputs,
 } from "@/lib/gestura-config";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -44,44 +50,43 @@ import { Switch } from "@/components/ui/switch";
 
 export default function ConfigurationPage() {
   const [devices, setDevices] = useState<DeviceDefinition[]>(defaultDevices);
-  const [selectedDeviceId, setSelectedDeviceId] = useState(defaultDevices[0].id);
-  const [mappings, setMappings] = useState<ActionMapping[]>([
-    defaultMapping,
-    {
-      ...defaultMapping,
-      source: "bottom_tap",
-      mode: "toggle",
-      targetAction: "power",
-      min: 0,
-      max: 1,
-      step: 1,
-      deadzone: 0,
-      smoothing: 0,
-    },
-  ]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
+  const [mappings, setMappings] = useState<ActionMapping[]>([]);
+  const [managers, setManagers] = useState<DeviceManagerInfo[]>([]);
+  const [backendUrl, setBackendUrl] = useState("http://localhost:3001");
+  const [kasaName, setKasaName] = useState("Kasa Lab");
+  const [externalName, setExternalName] = useState("Simulator Lab");
+  const [externalBaseUrl, setExternalBaseUrl] = useState("http://localhost:3101");
+  const [externalAuthToken, setExternalAuthToken] = useState("");
+  const [managerStatus, setManagerStatus] = useState("No managers loaded.");
 
-  const selectedDevice = devices.find((device) => device.id === selectedDeviceId) ?? devices[0];
+  const selectedDevice = devices.find((device) => device.id === selectedDeviceId) ?? null;
+  const kasaManager = useMemo(
+    () => managers.find((manager) => manager.kind === "kasa" || manager.id.includes("kasa")) ?? null,
+    [managers],
+  );
   const selectedDeviceMappings = useMemo(
     () =>
-      selectedDevice.capabilities.map(
+      selectedDevice?.capabilities.map(
         (capability) =>
           mappings.find(
             (mapping) =>
               mapping.targetDevice === selectedDevice.id && mapping.targetAction === capability.id,
           ) ?? createCapabilityMapping(selectedDevice.id, capability),
-      ),
+      ) ?? [],
     [selectedDevice, mappings],
   );
 
   const generatedConfig = useMemo(
-    () => ({
+    () => selectedDevice ? ({
       device: selectedDevice,
       mappings: selectedDeviceMappings.map(toGloveMappingContract),
-    }),
+    }) : null,
     [selectedDevice, selectedDeviceMappings],
   );
 
   const updateSelectedDevice = (updates: Partial<DeviceDefinition>) => {
+    if (!selectedDevice) return;
     setDevices((current) =>
       current.map((device) =>
         device.id === selectedDevice.id
@@ -95,6 +100,7 @@ export default function ConfigurationPage() {
   };
 
   const toggleCapability = (capability: DeviceCapability, enabled: boolean) => {
+    if (!selectedDevice) return;
     const nextCapabilities = enabled
       ? [...selectedDevice.capabilities, capability]
       : selectedDevice.capabilities.filter((item) => item.id !== capability.id);
@@ -116,6 +122,7 @@ export default function ConfigurationPage() {
     key: Key,
     value: ActionMapping[Key],
   ) => {
+    if (!selectedDevice) return;
     setMappings((current) => {
       const next = current.filter(
         (mapping) =>
@@ -136,6 +143,96 @@ export default function ConfigurationPage() {
       ];
     });
   };
+
+  const refreshManagersAndDevices = async () => {
+    try {
+      const managerResponse = await fetch(`${backendUrl}/api/managers`);
+      const managerList = managerResponse.ok
+        ? ((await managerResponse.json()) as DeviceManagerInfo[])
+        : [];
+      setManagers(managerList);
+
+      const deviceResponse = await fetch(`${backendUrl}/api/devices`);
+      const backendDevices = deviceResponse.ok
+        ? ((await deviceResponse.json()) as BackendManagedDevice[])
+        : [];
+      const mappedDevices = backendDevices.map((device) =>
+        mapBackendDeviceToDefinition(
+          device,
+          managerList.find((manager) => manager.id === device.managerId),
+        ),
+      );
+      setDevices(mappedDevices);
+      setSelectedDeviceId((current) =>
+        current && mappedDevices.some((device) => device.id === current)
+          ? current
+          : mappedDevices[0]?.id ?? null,
+      );
+      setManagerStatus(`Loaded ${managerList.length} managers and ${mappedDevices.length} devices.`);
+    } catch (error) {
+      setManagerStatus(error instanceof Error ? error.message : "Failed to load managers.");
+    }
+  };
+
+  const enableKasaManager = async () => {
+    try {
+      const response = await fetch(`${backendUrl}/api/managers/kasa`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: kasaName }),
+      });
+
+      if (!response.ok) throw new Error(`Kasa manager registration failed (${response.status})`);
+      setManagerStatus("Kasa native manager enabled.");
+      await refreshManagersAndDevices();
+    } catch (error) {
+      setManagerStatus(error instanceof Error ? error.message : "Failed to enable Kasa manager.");
+    }
+  };
+
+  const disableKasaManager = async () => {
+    if (!kasaManager) return;
+
+    try {
+      const response = await fetch(`${backendUrl}/api/managers/${kasaManager.id}`, {
+        method: "DELETE",
+      });
+
+      if (!response.ok) throw new Error(`Kasa manager disable failed (${response.status})`);
+      setManagerStatus("Kasa native manager disabled.");
+      await refreshManagersAndDevices();
+    } catch (error) {
+      setManagerStatus(error instanceof Error ? error.message : "Failed to disable Kasa manager.");
+    }
+  };
+
+  const addExternalManager = async () => {
+    try {
+      const response = await fetch(`${backendUrl}/api/managers/external`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: externalName,
+          baseUrl: externalBaseUrl,
+          authToken: externalAuthToken || undefined,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.errors?.join(", ") || `External manager validation failed (${response.status})`);
+      }
+
+      setManagerStatus(`External manager added. Imported ${payload.deviceCount ?? 0} devices.`);
+      await refreshManagersAndDevices();
+    } catch (error) {
+      setManagerStatus(error instanceof Error ? error.message : "Failed to add external manager.");
+    }
+  };
+
+  useEffect(() => {
+    void refreshManagersAndDevices();
+  }, []);
 
   return (
     <main className="min-h-screen bg-background">
@@ -165,6 +262,119 @@ export default function ConfigurationPage() {
           </nav>
         </header>
 
+        <section className="grid gap-4 lg:grid-cols-[1fr_1fr]">
+          <div className="rounded-lg border border-border bg-card p-5">
+            <div className="mb-5 flex items-center gap-2">
+              <Server className="size-5 text-primary" />
+              <div>
+                <h2 className="font-semibold">Native Managers</h2>
+                <p className="text-sm text-muted-foreground">Backend-hosted integrations.</p>
+              </div>
+            </div>
+
+            <div className="rounded-md border border-border bg-background p-4">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="flex size-12 shrink-0 items-center justify-center rounded-md border border-primary/25 bg-primary/10 text-primary">
+                    <Lightbulb className="size-6" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="font-semibold">Kasa</h3>
+                      <Badge
+                        variant={kasaManager ? "default" : "outline"}
+                        className={
+                          kasaManager
+                            ? "rounded-full bg-emerald-600 text-white"
+                            : "rounded-full border-muted-foreground/30 text-muted-foreground"
+                        }
+                      >
+                        {kasaManager ? "Enabled" : "Disabled"}
+                      </Badge>
+                    </div>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      Native TP-Link Kasa manager for bulbs and plugs.
+                    </p>
+                  </div>
+                </div>
+
+                <Button
+                  onClick={kasaManager ? disableKasaManager : enableKasaManager}
+                  variant={kasaManager ? "outline" : "default"}
+                  className="w-full sm:w-auto"
+                >
+                  {kasaManager ? (
+                    "Disable"
+                  ) : (
+                    <>
+                      <Plus className="size-4" />
+                      Enable
+                    </>
+                  )}
+                </Button>
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <Field label="Manager name">
+                  <Input
+                    value={kasaManager?.name ?? kasaName}
+                    onChange={(event) => setKasaName(event.target.value)}
+                    disabled={Boolean(kasaManager)}
+                  />
+                </Field>
+                <Field label="Manager ID">
+                  <Input
+                    value={kasaManager?.id ?? "mgr-kasa"}
+                    disabled
+                    className="font-mono text-xs"
+                  />
+                </Field>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-border bg-card p-5">
+            <div className="mb-5 flex items-center gap-2">
+              <Server className="size-5 text-chart-2" />
+              <div>
+                <h2 className="font-semibold">External Manager</h2>
+                <p className="text-sm text-muted-foreground">Backend validates the manager API contract.</p>
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Display name">
+                <Input value={externalName} onChange={(event) => setExternalName(event.target.value)} />
+              </Field>
+              <Field label="Base URL">
+                <Input
+                  value={externalBaseUrl}
+                  onChange={(event) => setExternalBaseUrl(event.target.value)}
+                  className="font-mono text-xs"
+                />
+              </Field>
+              <Field label="Auth token">
+                <Input
+                  value={externalAuthToken}
+                  onChange={(event) => setExternalAuthToken(event.target.value)}
+                  placeholder="optional"
+                />
+              </Field>
+              <div className="flex items-end gap-2">
+                <Button onClick={addExternalManager} className="flex-1">
+                  <Plus className="size-4" />
+                  Add
+                </Button>
+                <Button onClick={refreshManagersAndDevices} variant="outline" size="icon" aria-label="Refresh managers">
+                  <RefreshCw className="size-4" />
+                </Button>
+              </div>
+            </div>
+            <div className="mt-4 rounded-md border border-border bg-background p-3 text-sm text-muted-foreground">
+              {managerStatus}
+            </div>
+          </div>
+        </section>
+
         <section className="grid gap-4 lg:grid-cols-[360px_1fr]">
           <aside className="rounded-lg border border-border bg-card p-5">
             <div className="mb-5 flex items-center justify-between gap-3">
@@ -176,6 +386,11 @@ export default function ConfigurationPage() {
             </div>
 
             <div className="space-y-2">
+              {devices.length === 0 && (
+                <div className="rounded-md border border-dashed border-border bg-background p-4 text-sm text-muted-foreground">
+                  No devices imported yet. Enable a native manager or add an external manager.
+                </div>
+              )}
               {devices.map((device) => (
                 <button
                   key={device.id}
@@ -186,6 +401,11 @@ export default function ConfigurationPage() {
                       : "border-border bg-background hover:border-primary/50"
                   }`}
                 >
+                  <span
+                    className={`absolute left-2 top-0 rounded-b px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-background ${managerColorClass(device.managerId)}`}
+                  >
+                    {device.managerId}
+                  </span>
                   <span
                     className={`absolute left-0 top-0 h-full w-1 ${managerColorClass(device.managerId)}`}
                   />
@@ -202,6 +422,7 @@ export default function ConfigurationPage() {
             </div>
           </aside>
 
+          {selectedDevice ? (
           <section>
             <div className="rounded-lg border border-border bg-card p-5">
               <div className="mb-5 flex items-center gap-2">
@@ -314,8 +535,17 @@ export default function ConfigurationPage() {
               </div>
             </div>
           </section>
+          ) : (
+            <section className="rounded-lg border border-border bg-card p-6">
+              <h2 className="font-semibold">Device Definition</h2>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Select an imported device to configure its enabled actions and function mappings.
+              </p>
+            </section>
+          )}
         </section>
 
+        {selectedDevice && (
         <section className="grid gap-4 lg:grid-cols-[1fr_420px]">
           <div className="rounded-lg border border-border bg-card p-5">
             <div className="mb-5 flex items-center gap-2">
@@ -362,6 +592,7 @@ export default function ConfigurationPage() {
             </pre>
           </div>
         </section>
+        )}
       </div>
     </main>
   );
@@ -379,8 +610,8 @@ function FunctionMappingCard({
   onUpdate: <Key extends keyof ActionMapping>(key: Key, value: ActionMapping[Key]) => void;
 }) {
   return (
-    <div className="rounded-md border border-border bg-background p-4">
-      <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+    <details className="group rounded-md border border-border bg-background p-4">
+      <summary className="flex cursor-pointer list-none flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <div className="flex items-center gap-2">
             <h3 className="font-semibold">{capability.label}</h3>
@@ -390,10 +621,14 @@ function FunctionMappingCard({
             Target fixed to {deviceId}.{capability.id}
           </p>
         </div>
-        <Badge>{mapping.mode}</Badge>
-      </div>
+        <div className="flex items-center gap-2">
+          <Badge>{mapping.mode}</Badge>
+          <span className="text-xs text-muted-foreground group-open:hidden">Expand</span>
+          <span className="hidden text-xs text-muted-foreground group-open:inline">Collapse</span>
+        </div>
+      </summary>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Field label={`${capability.id} source`}>
           <Select value={mapping.source} onValueChange={(value) => onUpdate("source", value)}>
             <SelectTrigger className="w-full">
@@ -452,7 +687,7 @@ function FunctionMappingCard({
       <pre className="mt-4 max-h-52 overflow-auto rounded-md bg-secondary p-3 text-xs leading-relaxed text-secondary-foreground">
         {JSON.stringify(mapping, null, 2)}
       </pre>
-    </div>
+    </details>
   );
 }
 

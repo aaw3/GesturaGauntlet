@@ -381,6 +381,458 @@ function updateGyroBulbControl(nextConfig = {}) {
   return publicGyroBulbControl();
 }
 
+// --- MANAGER REGISTRY / NORMALIZED DEVICES ---
+const managers = new Map();
+const deviceRegistry = new Map();
+
+function clone(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function upsertDevices(devices = []) {
+  for (const device of devices) {
+    deviceRegistry.set(device.id, clone(device));
+  }
+}
+
+function getRegisteredDevices(managerId) {
+  const devices = Array.from(deviceRegistry.values()).map(clone);
+  return managerId ? devices.filter((device) => device.managerId === managerId) : devices;
+}
+
+function getRegisteredDevice(deviceId) {
+  const device = deviceRegistry.get(deviceId);
+  return device ? clone(device) : null;
+}
+
+function markOfflineMissing(managerId, activeIds) {
+  for (const [id, device] of deviceRegistry.entries()) {
+    if (device.managerId === managerId && !activeIds.has(id)) {
+      deviceRegistry.set(id, { ...device, online: 'offline' });
+    }
+  }
+}
+
+function registerManager(manager) {
+  managers.set(manager.info.id, manager);
+  return clone(manager.info);
+}
+
+function unregisterManager(managerId) {
+  const removed = managers.delete(managerId);
+  if (!removed) return false;
+
+  for (const [deviceId, device] of deviceRegistry.entries()) {
+    if (device.managerId === managerId) {
+      deviceRegistry.delete(deviceId);
+    }
+  }
+
+  return true;
+}
+
+function getManagerInfos() {
+  return Array.from(managers.values()).map((manager) => clone(manager.info));
+}
+
+function createKasaManager({ id = 'kasa-main', name = 'Kasa Manager' } = {}) {
+  const info = {
+    id,
+    name,
+    kind: 'kasa',
+    version: '1.0.0',
+    online: true,
+    supportsDiscovery: true,
+    supportsBulkActions: false,
+    integrationType: 'native',
+    metadata: {
+      plugConfigured: Boolean(process.env.PLUG_IP),
+      bulbConfigured: Boolean(process.env.BULB_IP),
+    },
+  };
+
+  return {
+    info,
+    async listDevices() {
+      const devices = [];
+
+      if (process.env.BULB_IP) {
+        devices.push({
+          id: `${id}-bulb`,
+          managerId: id,
+          source: 'kasa',
+          type: 'light',
+          name: 'Kasa Bulb',
+          online: 'online',
+          capabilities: [
+            { id: 'power', label: 'Power', kind: 'toggle', readable: true, writable: true },
+            {
+              id: 'brightness',
+              label: 'Brightness',
+              kind: 'range',
+              readable: true,
+              writable: true,
+              range: { min: 0, max: 100, step: 1, unit: '%' },
+            },
+            {
+              id: 'hue',
+              label: 'Hue',
+              kind: 'range',
+              readable: true,
+              writable: true,
+              range: { min: 0, max: 360, step: 1, unit: 'deg' },
+            },
+            {
+              id: 'saturation',
+              label: 'Saturation',
+              kind: 'range',
+              readable: true,
+              writable: true,
+              range: { min: 0, max: 100, step: 1, unit: '%' },
+            },
+            {
+              id: 'color_temp',
+              label: 'Color temperature',
+              kind: 'range',
+              readable: true,
+              writable: true,
+              range: { min: 2500, max: 9000, step: 100, unit: 'K' },
+            },
+          ],
+          metadata: { host: process.env.BULB_IP },
+        });
+      }
+
+      if (process.env.PLUG_IP) {
+        devices.push({
+          id: `${id}-plug`,
+          managerId: id,
+          source: 'kasa',
+          type: 'plug',
+          name: 'Kasa Plug',
+          online: 'online',
+          capabilities: [
+            { id: 'power', label: 'Power', kind: 'toggle', readable: true, writable: true },
+          ],
+          metadata: { host: process.env.PLUG_IP },
+        });
+      }
+
+      return devices.map(clone);
+    },
+    async getDeviceState(deviceId) {
+      const device = getRegisteredDevice(deviceId);
+      if (!device || device.managerId !== id) return null;
+
+      const values = {};
+      for (const capability of device.capabilities) {
+        values[capability.id] = null;
+      }
+
+      return { deviceId, ts: Date.now(), values };
+    },
+    async executeAction(action) {
+      const device = getRegisteredDevice(action.deviceId);
+      if (!device || device.managerId !== id) {
+        return {
+          ok: false,
+          deviceId: action.deviceId,
+          capabilityId: action.capabilityId,
+          message: 'Kasa device not found',
+        };
+      }
+
+      const capability = device.capabilities.find((item) => item.id === action.capabilityId);
+      if (!capability) {
+        return {
+          ok: false,
+          deviceId: action.deviceId,
+          capabilityId: action.capabilityId,
+          message: 'Capability not supported by device',
+        };
+      }
+
+      if (action.commandType === 'set' && action.value === undefined) {
+        return {
+          ok: false,
+          deviceId: action.deviceId,
+          capabilityId: action.capabilityId,
+          message: 'Missing value for set command',
+        };
+      }
+
+      if (action.commandType === 'delta' && action.delta === undefined) {
+        return {
+          ok: false,
+          deviceId: action.deviceId,
+          capabilityId: action.capabilityId,
+          message: 'Missing delta for delta command',
+        };
+      }
+
+      if (action.commandType === 'toggle' && capability.kind !== 'toggle') {
+        return {
+          ok: false,
+          deviceId: action.deviceId,
+          capabilityId: action.capabilityId,
+          message: 'Toggle command only valid for toggle capability',
+        };
+      }
+
+      try {
+        if (device.type === 'plug' && action.capabilityId === 'power') {
+          const result = await kasa.setPlugPower(action.commandType === 'toggle' ? true : action.value);
+          return {
+            ok: Boolean(result.success),
+            deviceId: action.deviceId,
+            capabilityId: action.capabilityId,
+            appliedValue: result.state ?? action.value ?? null,
+            message: result.error,
+          };
+        }
+
+        if (device.type === 'light' && action.capabilityId === 'power') {
+          const result = await kasa.setBulbPower(action.commandType === 'toggle' ? true : action.value);
+          return {
+            ok: Boolean(result.success),
+            deviceId: action.deviceId,
+            capabilityId: action.capabilityId,
+            appliedValue: action.value ?? null,
+            message: result.error,
+          };
+        }
+
+        if (device.type === 'light' && action.capabilityId === 'brightness') {
+          const value = action.commandType === 'delta' ? action.delta : action.value;
+          const result = await kasa.setBulbBrightness(value, { powerOffAtZero: true });
+          return {
+            ok: Boolean(result.success),
+            deviceId: action.deviceId,
+            capabilityId: action.capabilityId,
+            appliedValue: value,
+            message: result.error,
+          };
+        }
+
+        if (device.type === 'light' && ['hue', 'saturation', 'color_temp'].includes(action.capabilityId)) {
+          const key = action.capabilityId === 'color_temp' ? 'color_temp' : action.capabilityId;
+          const result = await kasa.setBulbState({ [key]: action.value, on_off: 1 });
+          return {
+            ok: Boolean(result.success),
+            deviceId: action.deviceId,
+            capabilityId: action.capabilityId,
+            appliedValue: action.value,
+            message: result.error,
+          };
+        }
+
+        return {
+          ok: false,
+          deviceId: action.deviceId,
+          capabilityId: action.capabilityId,
+          message: 'Kasa action not implemented for capability',
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          deviceId: action.deviceId,
+          capabilityId: action.capabilityId,
+          message: err.message,
+        };
+      }
+    },
+  };
+}
+
+function createExternalManager({ info, baseUrl, authToken }) {
+  const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+
+  return {
+    info: {
+      ...info,
+      integrationType: 'external',
+      baseUrl,
+    },
+    async listDevices() {
+      return fetchJson(`${baseUrl}/api/devices`, { headers });
+    },
+    async getDeviceState(deviceId) {
+      return fetchJson(`${baseUrl}/api/devices/${encodeURIComponent(deviceId)}/state`, { headers });
+    },
+    async executeAction(action) {
+      return fetchJson(
+        `${baseUrl}/api/devices/${encodeURIComponent(action.deviceId)}/actions/${encodeURIComponent(action.capabilityId)}`,
+        {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify(action),
+        }
+      );
+    },
+  };
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    throw new Error(`${options.method || 'GET'} ${url} failed with ${response.status}`);
+  }
+  return response.json();
+}
+
+async function validateExternalManager({ name, baseUrl, authToken }) {
+  const errors = [];
+  if (!name || !String(name).trim()) errors.push('Display name is required');
+  if (!baseUrl || !String(baseUrl).trim()) errors.push('Base URL is required');
+  if (errors.length > 0) return { ok: false, errors };
+
+  const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+  let managerInfo;
+  let devices;
+
+  try {
+    managerInfo = await fetchJson(`${baseUrl}/api/manager`, { headers });
+  } catch (err) {
+    return { ok: false, errors: [`GET /api/manager failed: ${err.message}`] };
+  }
+
+  if (!managerInfo.id) errors.push('Manager info missing id');
+  if (!managerInfo.name) errors.push('Manager info missing name');
+  if (!managerInfo.kind) errors.push('Manager info missing kind');
+  if (!managerInfo.version) errors.push('Manager info missing version');
+  if (managerInfo.integrationType && managerInfo.integrationType !== 'external') {
+    errors.push('Manager integrationType must be external');
+  }
+
+  try {
+    devices = await fetchJson(`${baseUrl}/api/devices`, { headers });
+  } catch (err) {
+    return {
+      ok: false,
+      managerInfo,
+      errors: [...errors, `GET /api/devices failed: ${err.message}`],
+    };
+  }
+
+  if (!Array.isArray(devices)) {
+    errors.push('GET /api/devices must return an array');
+    devices = [];
+  }
+
+  for (const device of devices) {
+    if (!device.id) errors.push('Device missing id');
+    if (!device.name) errors.push(`Device ${device.id || '<unknown>'} missing name`);
+    if (!device.type) errors.push(`Device ${device.id || '<unknown>'} missing type`);
+    if (!Array.isArray(device.capabilities)) {
+      errors.push(`Device ${device.id || '<unknown>'} missing capabilities array`);
+      continue;
+    }
+
+    for (const capability of device.capabilities) {
+      if (!capability.id) errors.push(`Device ${device.id} has capability missing id`);
+      if (!capability.label) errors.push(`Device ${device.id} has capability missing label`);
+      if (!capability.kind) errors.push(`Device ${device.id} has capability missing kind`);
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    managerInfo: {
+      ...managerInfo,
+      name: name || managerInfo.name,
+      integrationType: 'external',
+      baseUrl,
+    },
+    devices,
+    deviceCount: devices.length,
+    errors,
+  };
+}
+
+async function syncManager(managerId) {
+  const manager = managers.get(managerId);
+  if (!manager) {
+    return {
+      managerId,
+      discovered: 0,
+      added: 0,
+      updated: 0,
+      offlineMarked: 0,
+      errors: [`Manager ${managerId} not found`],
+    };
+  }
+
+  try {
+    const devices = await manager.listDevices();
+    const activeIds = new Set(devices.map((device) => device.id));
+    const existing = getRegisteredDevices(managerId);
+    const existingIds = new Set(existing.map((device) => device.id));
+    let added = 0;
+    let updated = 0;
+
+    for (const device of devices) {
+      if (existingIds.has(device.id)) updated++;
+      else added++;
+    }
+
+    const offlineMarked = existing.filter((device) => !activeIds.has(device.id)).length;
+    upsertDevices(devices);
+    markOfflineMissing(managerId, activeIds);
+
+    return {
+      managerId,
+      discovered: devices.length,
+      added,
+      updated,
+      offlineMarked,
+      errors: [],
+    };
+  } catch (err) {
+    return {
+      managerId,
+      discovered: 0,
+      added: 0,
+      updated: 0,
+      offlineMarked: 0,
+      errors: [err.message],
+    };
+  }
+}
+
+async function executeDeviceAction(action) {
+  const device = getRegisteredDevice(action.deviceId);
+  if (!device) {
+    return {
+      ok: false,
+      deviceId: action.deviceId,
+      capabilityId: action.capabilityId,
+      message: 'Device not found in registry',
+    };
+  }
+
+  const capability = device.capabilities.find((item) => item.id === action.capabilityId);
+  if (!capability) {
+    return {
+      ok: false,
+      deviceId: action.deviceId,
+      capabilityId: action.capabilityId,
+      message: 'Capability not found',
+    };
+  }
+
+  const manager = managers.get(device.managerId);
+  if (!manager) {
+    return {
+      ok: false,
+      deviceId: action.deviceId,
+      capabilityId: action.capabilityId,
+      message: `Manager ${device.managerId} not found`,
+    };
+  }
+
+  return manager.executeAction(action);
+}
+
 // MQTT Broker (embedded - no external Mosquitto needed)
 brokerServer.on('error', (err) => {
   console.error(`[MQTT] Broker failed on port ${MQTT_BROKER_PORT}: ${err.message}`);
@@ -543,6 +995,137 @@ app.post('/api/mode', (req, res) => {
   io.emit('modeUpdate', currentMode);
   io.emit('gyroBulbControl', publicGyroBulbControl());
   res.json({ success: true, mode: currentMode });
+});
+
+app.get('/api/managers', (req, res) => {
+  res.json(getManagerInfos());
+});
+
+app.post('/api/managers/kasa', async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  const id = String(req.body?.id || 'kasa-main').trim() || 'kasa-main';
+
+  if (!name) {
+    res.status(400).json({ error: 'Kasa manager name is required' });
+    return;
+  }
+
+  const manager = createKasaManager({ id, name });
+  const info = registerManager(manager);
+  res.status(201).json(info);
+});
+
+app.post('/api/managers/external', async (req, res) => {
+  const validation = await validateExternalManager({
+    name: req.body?.name,
+    baseUrl: req.body?.baseUrl,
+    authToken: req.body?.authToken,
+  });
+
+  if (!validation.ok || !validation.managerInfo) {
+    res.status(400).json(validation);
+    return;
+  }
+
+  const manager = createExternalManager({
+    info: validation.managerInfo,
+    baseUrl: req.body.baseUrl,
+    authToken: req.body?.authToken,
+  });
+  registerManager(manager);
+  const sync = await syncManager(validation.managerInfo.id);
+
+  res.status(201).json({
+    ok: true,
+    manager: manager.info,
+    deviceCount: validation.deviceCount,
+    sync,
+  });
+});
+
+app.delete('/api/managers/:managerId', (req, res) => {
+  const removed = unregisterManager(req.params.managerId);
+  if (!removed) {
+    res.status(404).json({ error: 'Manager not found' });
+    return;
+  }
+
+  res.json({ ok: true, managerId: req.params.managerId });
+});
+
+app.get('/api/managers/devices', async (req, res) => {
+  const results = [];
+  for (const manager of managers.values()) {
+    try {
+      results.push({
+        manager: manager.info,
+        devices: await manager.listDevices(),
+      });
+    } catch (err) {
+      results.push({
+        manager: manager.info,
+        devices: [],
+        error: err.message,
+      });
+    }
+  }
+  res.json(results);
+});
+
+app.post('/api/managers/:managerId/sync', async (req, res) => {
+  res.json(await syncManager(req.params.managerId));
+});
+
+app.post('/api/managers/:managerId/discover', async (req, res) => {
+  res.json(await syncManager(req.params.managerId));
+});
+
+app.get('/api/devices', (req, res) => {
+  res.json(getRegisteredDevices(req.query.managerId));
+});
+
+app.get('/api/devices/:deviceId', (req, res) => {
+  const device = getRegisteredDevice(req.params.deviceId);
+  if (!device) {
+    res.status(404).json({ error: 'Device not found' });
+    return;
+  }
+  res.json(device);
+});
+
+app.get('/api/devices/:deviceId/state', async (req, res) => {
+  const device = getRegisteredDevice(req.params.deviceId);
+  if (!device) {
+    res.status(404).json({ error: 'Device not found' });
+    return;
+  }
+
+  const manager = managers.get(device.managerId);
+  if (!manager?.getDeviceState) {
+    res.status(404).json({ error: 'Device state not available' });
+    return;
+  }
+
+  try {
+    const state = await manager.getDeviceState(req.params.deviceId);
+    if (!state) {
+      res.status(404).json({ error: 'Device state not found' });
+      return;
+    }
+    res.json(state);
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post('/api/devices/:deviceId/actions/:capabilityId', async (req, res) => {
+  res.json(
+    await executeDeviceAction({
+      ...req.body,
+      deviceId: req.params.deviceId,
+      capabilityId: req.params.capabilityId,
+    })
+  );
 });
 
 app.get('/api/kasa/status', async (req, res) => {

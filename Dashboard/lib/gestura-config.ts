@@ -1,6 +1,13 @@
 export type CapabilityType = "toggle" | "range" | "color" | "discrete";
 
-export type DeviceKind = "kasa-bulb" | "kasa-plug" | "sim-light" | "sim-fan";
+export type DeviceKind =
+  | "kasa-bulb"
+  | "kasa-plug"
+  | "sim-light"
+  | "sim-fan"
+  | "sim-thermostat"
+  | "scene"
+  | "other";
 
 export interface DeviceCapability {
   id: string;
@@ -10,6 +17,8 @@ export interface DeviceCapability {
   max?: number;
   step?: number;
   options?: string[];
+  readable?: boolean;
+  writable?: boolean;
 }
 
 export interface DeviceDefinition {
@@ -20,6 +29,47 @@ export interface DeviceDefinition {
   name: string;
   kind: DeviceKind;
   capabilities: DeviceCapability[];
+}
+
+export interface DeviceManagerInfo {
+  id: string;
+  name: string;
+  kind: "kasa" | "simulator" | "custom";
+  version: string;
+  online: boolean;
+  supportsDiscovery: boolean;
+  supportsBulkActions: boolean;
+  integrationType?: "native" | "external";
+  baseUrl?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface BackendRangeSpec {
+  min: number;
+  max: number;
+  step?: number;
+  unit?: string;
+}
+
+export interface BackendCapability {
+  id: string;
+  label: string;
+  kind: "toggle" | "range" | "color" | "discrete" | "scene";
+  readable?: boolean;
+  writable?: boolean;
+  range?: BackendRangeSpec;
+  options?: string[];
+}
+
+export interface BackendManagedDevice {
+  id: string;
+  managerId: string;
+  source: "kasa" | "simulator" | "custom";
+  type: "light" | "plug" | "fan" | "thermostat" | "scene" | "other";
+  name: string;
+  online: "online" | "offline" | "unknown";
+  capabilities: BackendCapability[];
+  metadata?: Record<string, unknown>;
 }
 
 export type MappingMode =
@@ -77,6 +127,9 @@ export const deviceKinds: { id: DeviceKind; label: string }[] = [
   { id: "kasa-plug", label: "Kasa plug" },
   { id: "sim-light", label: "Simulator light" },
   { id: "sim-fan", label: "Simulator fan" },
+  { id: "sim-thermostat", label: "Simulator thermostat" },
+  { id: "scene", label: "Scene" },
+  { id: "other", label: "Other" },
 ];
 
 export const capabilityLibrary: DeviceCapability[] = [
@@ -90,41 +143,7 @@ export const capabilityLibrary: DeviceCapability[] = [
   { id: "scene", label: "Scene", type: "discrete", options: ["focus", "break", "alert"] },
 ];
 
-export const defaultDevices: DeviceDefinition[] = [
-  {
-    id: "desk_lamp",
-    managerId: "kasa-main",
-    source: "kasa",
-    integrationType: "native",
-    name: "Desk Lamp",
-    kind: "kasa-bulb",
-    capabilities: [
-      capabilityLibrary[0],
-      capabilityLibrary[1],
-      capabilityLibrary[2],
-      capabilityLibrary[3],
-      capabilityLibrary[4],
-    ],
-  },
-  {
-    id: "desk_plug",
-    managerId: "kasa-main",
-    source: "kasa",
-    integrationType: "native",
-    name: "Desk Plug",
-    kind: "kasa-plug",
-    capabilities: [capabilityLibrary[0]],
-  },
-  {
-    id: "sim_fan",
-    managerId: "sim-manager-1",
-    source: "simulator",
-    integrationType: "external",
-    name: "Simulator Fan",
-    kind: "sim-fan",
-    capabilities: [capabilityLibrary[0], capabilityLibrary[5]],
-  },
-];
+export const defaultDevices: DeviceDefinition[] = [];
 
 export const defaultMapping: ActionMapping = {
   source: "glove.roll",
@@ -139,3 +158,42 @@ export const defaultMapping: ActionMapping = {
   offset: 0,
   smoothing: 0.25,
 };
+
+export function mapBackendDeviceToDefinition(
+  device: BackendManagedDevice,
+  manager?: DeviceManagerInfo,
+): DeviceDefinition {
+  return {
+    id: device.id,
+    managerId: device.managerId,
+    source: device.source,
+    integrationType: manager?.integrationType ?? (device.source === "kasa" ? "native" : "external"),
+    name: device.name,
+    kind: mapDeviceKind(device),
+    capabilities: device.capabilities.map(mapBackendCapability),
+  };
+}
+
+function mapBackendCapability(capability: BackendCapability): DeviceCapability {
+  return {
+    id: capability.id,
+    label: capability.label,
+    type: capability.kind === "scene" ? "discrete" : capability.kind,
+    min: capability.range?.min,
+    max: capability.range?.max,
+    step: capability.range?.step,
+    options: capability.options,
+    readable: capability.readable,
+    writable: capability.writable,
+  };
+}
+
+function mapDeviceKind(device: BackendManagedDevice): DeviceKind {
+  if (device.source === "kasa" && device.type === "light") return "kasa-bulb";
+  if (device.source === "kasa" && device.type === "plug") return "kasa-plug";
+  if (device.source === "simulator" && device.type === "light") return "sim-light";
+  if (device.source === "simulator" && device.type === "fan") return "sim-fan";
+  if (device.source === "simulator" && device.type === "thermostat") return "sim-thermostat";
+  if (device.type === "scene") return "scene";
+  return "other";
+}
