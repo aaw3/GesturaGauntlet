@@ -12,3 +12,7 @@ MQTT_TOPIC_MODE=gauntlet/mode
 
 # Dashboard sensor sample history retained by the backend.
 SENSOR_HISTORY_SIZE=200
+
+# Optional Postgres persistence. When unset, managers and configuration stay in memory.
+DATABASE_URL=postgres://gestura:gestura@localhost:5432/gestura
+DATABASE_SSL=false

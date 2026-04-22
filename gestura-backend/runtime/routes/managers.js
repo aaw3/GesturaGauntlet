@@ -27,11 +27,16 @@ function createManagersRouter({ managerService, deviceRegistry, deviceSyncServic
 
     const existing = managerService.get(id);
     if (existing) {
-      managerService.unregister(id);
-      deviceRegistry.clearManagerDevices(id);
+      await managerService.unregister(id);
+      await deviceRegistry.clearManagerDevices(id);
     }
 
-    managerService.register(manager);
+    await managerService.register(manager, {
+      kind: 'kasa',
+      integrationType: 'native',
+      discoveryTimeoutMs: Number(req.body?.discoveryTimeoutMs || 3000),
+      scanIntervalMs: Number(req.body?.scanIntervalMs || 5 * 60 * 1000),
+    });
     const sync = await deviceSyncService.syncManager(id);
     manager.startAutoDiscovery(() => deviceSyncService.syncManager(id));
 
@@ -55,7 +60,12 @@ function createManagersRouter({ managerService, deviceRegistry, deviceSyncServic
       baseUrl: req.body.baseUrl,
       authToken: req.body?.authToken,
     });
-    managerService.register(manager);
+    await managerService.register(manager, {
+      kind: validation.managerInfo.kind,
+      integrationType: 'external',
+      baseUrl: req.body.baseUrl,
+      authToken: req.body?.authToken,
+    });
     const sync = await deviceSyncService.syncManager(validation.managerInfo.id);
 
     res.status(201).json({
@@ -66,14 +76,14 @@ function createManagersRouter({ managerService, deviceRegistry, deviceSyncServic
     });
   });
 
-  router.delete('/:managerId', (req, res) => {
-    const removed = managerService.unregister(req.params.managerId);
+  router.delete('/:managerId', async (req, res) => {
+    const removed = await managerService.unregister(req.params.managerId);
     if (!removed) {
       res.status(404).json({ error: 'Manager not found' });
       return;
     }
 
-    deviceRegistry.clearManagerDevices(req.params.managerId);
+    await deviceRegistry.clearManagerDevices(req.params.managerId);
     res.json({ ok: true, managerId: req.params.managerId });
   });
 

@@ -1,7 +1,8 @@
 class DeviceSyncService {
-  constructor(managerService, deviceRegistry) {
+  constructor(managerService, deviceRegistry, { persistence } = {}) {
     this.managerService = managerService;
     this.deviceRegistry = deviceRegistry;
+    this.persistence = persistence;
   }
 
   async syncManager(managerId) {
@@ -31,8 +32,9 @@ class DeviceSyncService {
       }
 
       const offlineMarked = existing.filter((device) => !activeIds.has(device.id)).length;
-      this.deviceRegistry.upsertMany(devices);
+      await this.deviceRegistry.upsertMany(devices);
       this.deviceRegistry.markOfflineMissing(managerId, activeIds);
+      await this.persistence?.saveDevicesForManager?.(managerId, devices);
 
       return {
         managerId,

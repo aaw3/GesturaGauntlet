@@ -1,23 +1,33 @@
 const { clone } = require('../utils');
 
 class ManagerService {
-  constructor() {
+  constructor({ persistence } = {}) {
     this.managers = new Map();
+    this.persistence = persistence;
   }
 
-  register(manager) {
+  async register(manager, config = {}) {
     const info = manager.getInfo();
     this.managers.set(info.id, manager);
+    await this.persistence?.upsertManagerConfig?.({
+      info,
+      baseUrl: config.baseUrl,
+      authToken: config.authToken,
+      config,
+    });
     return clone(info);
   }
 
-  unregister(managerId) {
+  async unregister(managerId) {
     const manager = this.managers.get(managerId);
     const removed = this.managers.delete(managerId);
     if (removed && typeof manager?.shutdown === 'function') {
       void manager.shutdown().catch((err) => {
         console.error(`[ManagerService] Manager shutdown failed: ${err.message}`);
       });
+    }
+    if (removed) {
+      await this.persistence?.deleteManagerConfig?.(managerId);
     }
     return removed;
   }

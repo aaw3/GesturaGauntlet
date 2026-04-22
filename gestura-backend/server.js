@@ -11,8 +11,15 @@ const { DeviceRegistry } = require('./runtime/services/DeviceRegistry');
 const { ManagerService } = require('./runtime/services/ManagerService');
 const { DeviceSyncService } = require('./runtime/services/DeviceSyncService');
 const { ActionRouter } = require('./runtime/services/ActionRouter');
+const { MappingService } = require('./runtime/services/MappingService');
+const { SceneService } = require('./runtime/services/SceneService');
+const { PostgresStore } = require('./runtime/persistence/PostgresStore');
 const { createManagersRouter } = require('./runtime/routes/managers');
 const { createDevicesRouter } = require('./runtime/routes/devices');
+const { createMappingsRouter } = require('./runtime/routes/mappings');
+const { createScenesRouter } = require('./runtime/routes/scenes');
+const { createExternalManager } = require('./runtime/managers/externalManager');
+const { createKasaManager } = require('./runtime/managers/kasaManager');
 
 try {
   if (typeof process.loadEnvFile === 'function') process.loadEnvFile();
@@ -35,10 +42,13 @@ const MQTT_BROKER_PORT = Number(process.env.MQTT_BROKER_PORT || 1883);
 const SENSOR_HISTORY_SIZE = Number(process.env.SENSOR_HISTORY_SIZE || 200);
 
 const sensorStore = new SensorStore({ historySize: SENSOR_HISTORY_SIZE });
-const deviceRegistry = new DeviceRegistry();
-const managerService = new ManagerService();
-const deviceSyncService = new DeviceSyncService(managerService, deviceRegistry);
+const persistence = new PostgresStore();
+const deviceRegistry = new DeviceRegistry({ persistence });
+const managerService = new ManagerService({ persistence });
+const deviceSyncService = new DeviceSyncService(managerService, deviceRegistry, { persistence });
 const actionRouter = new ActionRouter(managerService, deviceRegistry);
+const mappingService = new MappingService({ persistence });
+const sceneService = new SceneService(actionRouter, { persistence });
 const brokerServer = net.createServer(aedes.handle);
 
 let currentMode = 'passive';
@@ -201,10 +211,15 @@ const services = {
   deviceRegistry,
   deviceSyncService,
   actionRouter,
+  mappingService,
+  sceneService,
+  persistence,
 };
 
 app.use('/api/managers', createManagersRouter(services));
 app.use('/api/devices', createDevicesRouter(services));
+app.use('/api/mappings', createMappingsRouter(services));
+app.use('/api/scenes', createScenesRouter(services));
 
 const PORT = Number(process.env.PORT || 3001);
 server.on('error', (err) => {
@@ -212,8 +227,71 @@ server.on('error', (err) => {
   process.exitCode = 1;
 });
 
-server.listen(PORT, () => {
-  console.log(`[Server] Gestura backend on http://localhost:${PORT}`);
-  console.log(`[Server] MQTT sensor topic: ${MQTT_TOPIC_SENSORS}`);
-  console.log(`[Server] MQTT mode topic  : ${MQTT_TOPIC_MODE}`);
-});
+async function hydrateManagersFromPersistence() {
+  const managerConfigs = await persistence.listManagerConfigs();
+
+  for (const config of managerConfigs) {
+    try {
+      if (config.integrationType === 'external') {
+        await managerService.register(
+          createExternalManager({
+            info: {
+              id: config.id,
+              name: config.name,
+              kind: config.kind,
+              version: config.version,
+              online: config.online,
+              supportsDiscovery: config.supportsDiscovery,
+              supportsBulkActions: config.supportsBulkActions,
+              integrationType: 'external',
+              metadata: config.metadata,
+            },
+            baseUrl: config.baseUrl,
+            authToken: config.authToken,
+          }),
+          config,
+        );
+      } else if (config.kind === 'kasa') {
+        await managerService.register(
+          createKasaManager({
+            id: config.id,
+            name: config.name,
+            discoveryTimeoutMs: Number(config.config?.discoveryTimeoutMs || 3000),
+            scanIntervalMs: Number(config.config?.scanIntervalMs || 5 * 60 * 1000),
+          }),
+          config,
+        );
+      }
+
+      await deviceSyncService.syncManager(config.id);
+    } catch (err) {
+      console.error(`[Persistence] Failed to hydrate manager ${config.id}: ${err.message}`);
+    }
+  }
+}
+
+async function start() {
+  try {
+    const persistenceEnabled = await persistence.init();
+    if (persistenceEnabled) {
+      await mappingService.loadPersisted();
+      await sceneService.loadPersisted();
+      await hydrateManagersFromPersistence();
+      console.log('[Persistence] Postgres persistence enabled.');
+    } else {
+      console.log('[Persistence] DATABASE_URL not set; using in-memory managers and configuration.');
+    }
+  } catch (err) {
+    console.error(`[Persistence] Startup failed: ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  server.listen(PORT, () => {
+    console.log(`[Server] Gestura backend on http://localhost:${PORT}`);
+    console.log(`[Server] MQTT sensor topic: ${MQTT_TOPIC_SENSORS}`);
+    console.log(`[Server] MQTT mode topic  : ${MQTT_TOPIC_MODE}`);
+  });
+}
+
+void start();

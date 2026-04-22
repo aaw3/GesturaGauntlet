@@ -30,7 +30,7 @@ export interface ManagerSyncResult {
 }
 
 export interface AddExternalManagerRequest {
-  name: string;
+  name?: string;
   baseUrl: string;
   authToken?: string;
 }

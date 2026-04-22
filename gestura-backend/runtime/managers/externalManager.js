@@ -37,7 +37,6 @@ function createExternalManager({ info, baseUrl, authToken }) {
 
 async function validateExternalManager({ name, baseUrl, authToken }) {
   const errors = [];
-  if (!name || !String(name).trim()) errors.push('Display name is required');
   if (!baseUrl || !String(baseUrl).trim()) errors.push('Base URL is required');
   if (errors.length > 0) return { ok: false, errors };
 
@@ -94,7 +93,7 @@ async function validateExternalManager({ name, baseUrl, authToken }) {
     ok: errors.length === 0,
     managerInfo: {
       ...managerInfo,
-      name: name || managerInfo.name,
+      name: String(name || '').trim() || managerInfo.name,
       integrationType: 'external',
       baseUrl,
     },

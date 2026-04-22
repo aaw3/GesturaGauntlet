@@ -100,7 +100,6 @@ async function validateExternalManager(
 ): Promise<ExternalManagerValidationResult> {
   const errors: string[] = [];
 
-  if (!request.name?.trim()) errors.push("Display name is required");
   if (!request.baseUrl?.trim()) errors.push("Base URL is required");
   if (errors.length > 0) return { ok: false, errors };
 

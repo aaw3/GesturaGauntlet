@@ -1,6 +1,4 @@
 import { DeviceRegistry } from "../managers/base/DeviceRegistry";
-import { SimulatorClient } from "../managers/simulator/simulator-client";
-import { SimulatorDeviceManager } from "../managers/simulator/SimulatorDeviceManager";
 import { ActionRouter } from "./ActionRouter";
 import { DeviceService } from "./DeviceService";
 import { DeviceSyncService } from "./DeviceSyncService";
@@ -29,17 +27,6 @@ export function createServices(): GesturaServices {
   const deviceSyncService = new DeviceSyncService(managerService, registry);
   const sceneService = new SceneService(actionRouter);
   const gloveStateService = new GloveStateService(mappingService, actionRouter);
-
-  const simulatorUrl = process.env.SIM_MANAGER_URL;
-  if (simulatorUrl) {
-    managerService.register(
-      "sim-manager-1",
-      new SimulatorDeviceManager(
-        "sim-manager-1",
-        new SimulatorClient(simulatorUrl, process.env.SIM_MANAGER_TOKEN),
-      ),
-    );
-  }
 
   return {
     registry,

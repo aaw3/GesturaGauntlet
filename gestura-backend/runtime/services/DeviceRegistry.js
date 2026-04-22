@@ -1,11 +1,12 @@
 const { clone } = require('../utils');
 
 class DeviceRegistry {
-  constructor() {
+  constructor({ persistence } = {}) {
     this.devices = new Map();
+    this.persistence = persistence;
   }
 
-  upsertMany(devices = []) {
+  async upsertMany(devices = []) {
     for (const device of devices) {
       this.devices.set(device.id, clone(device));
     }
@@ -33,12 +34,13 @@ class DeviceRegistry {
     }
   }
 
-  clearManagerDevices(managerId) {
+  async clearManagerDevices(managerId) {
     for (const [deviceId, device] of this.devices.entries()) {
       if (device.managerId === managerId) {
         this.devices.delete(deviceId);
       }
     }
+    await this.persistence?.clearManagerDevices?.(managerId);
   }
 }
 
