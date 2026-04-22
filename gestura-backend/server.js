@@ -104,6 +104,13 @@ const PASSIVE_MOTION_MOVING_THRESHOLD = Number(
 const PASSIVE_MOTION_STILL_THRESHOLD = Number(
   process.env.PASSIVE_MOTION_STILL_THRESHOLD || 0.03
 );
+const PASSIVE_ACTIVITY_RESET_THRESHOLD = Number(
+  process.env.PASSIVE_ACTIVITY_RESET_THRESHOLD || 0.02
+);
+const PASSIVE_STILL_DELAY_MS = Math.max(
+  0,
+  Number(process.env.PASSIVE_STILL_DELAY_MS || 60_000)
+);
 const PASSIVE_MOTION_BRIGHTNESS = Number(process.env.PASSIVE_MOTION_BRIGHTNESS || 100);
 const PASSIVE_MOTION_TRANSITION_MS = Number(process.env.PASSIVE_MOTION_TRANSITION_MS || 0);
 const PASSIVE_MOTION_ACCEL_DEADBAND = Math.max(
@@ -151,6 +158,7 @@ const passiveMotion = {
   lastEffectiveGyroMagnitude: 0,
   lastSource: null,
   lastSensorAt: 0,
+  lastMovementAt: 0,
   lastTelemetryLogAt: 0,
   staleWarned: false,
 };
@@ -400,14 +408,17 @@ function publicPassiveMotionState() {
     effectiveGyroMagnitude: Number(passiveMotion.lastEffectiveGyroMagnitude.toFixed(4)),
     accelDeadband: PASSIVE_MOTION_ACCEL_DEADBAND,
     gyroDeadbandDps: PASSIVE_MOTION_GYRO_DEADBAND_DPS,
+    activityResetThreshold: PASSIVE_ACTIVITY_RESET_THRESHOLD,
     movingThreshold: PASSIVE_MOTION_MOVING_THRESHOLD,
     stillThreshold: PASSIVE_MOTION_STILL_THRESHOLD,
+    stillDelayMs: PASSIVE_STILL_DELAY_MS,
     windowSize: PASSIVE_MOTION_WINDOW_SIZE,
     lastAppliedState: passiveMotion.lastAppliedState ?? 'unknown',
     commandInFlight: passiveMotion.commandInFlight,
     pendingState: passiveMotion.pendingState ?? 'none',
     lastColor: passiveMotion.lastColor,
     lastSource: passiveMotion.lastSource,
+    movementAgeMs: passiveMotion.lastMovementAt ? now - passiveMotion.lastMovementAt : null,
     sensorAgeMs: passiveMotion.lastSensorAt ? now - passiveMotion.lastSensorAt : null,
     updatedAt: passiveMotion.updatedAt,
   };
@@ -426,6 +437,7 @@ function logPassiveTelemetry(sensor) {
       `raw=${passiveMotion.lastMotionScore.toFixed(4)} ` +
       `applied=${passiveMotion.lastAppliedState ?? 'unknown'} ` +
       `inFlight=${passiveMotion.commandInFlight} pending=${passiveMotion.pendingState ?? 'none'} ` +
+      `moveAge=${passiveMotion.lastMovementAt ? now - passiveMotion.lastMovementAt : -1}ms ` +
       `dA=${passiveMotion.lastAccelDelta.toFixed(4)} eA=${passiveMotion.lastEffectiveAccelDelta.toFixed(4)} ` +
       `gMag=${passiveMotion.lastGyroMagnitude.toFixed(4)} eG=${passiveMotion.lastEffectiveGyroMagnitude.toFixed(4)} ` +
       `xyz=(${sensor.x.toFixed(3)},${sensor.y.toFixed(3)},${sensor.z.toFixed(3)}) ` +
@@ -434,6 +446,7 @@ function logPassiveTelemetry(sensor) {
 }
 
 function updatePassiveMotionState(sensor, source = 'unknown') {
+  const now = Date.now();
   const motion = computePassiveMotionMetrics(sensor);
   const motionScore = motion.score;
   passiveMotion.lastMotionScore = motion.score;
@@ -442,7 +455,7 @@ function updatePassiveMotionState(sensor, source = 'unknown') {
   passiveMotion.lastEffectiveAccelDelta = motion.effectiveAccelDelta;
   passiveMotion.lastEffectiveGyroMagnitude = motion.effectiveGyroMagnitude;
   passiveMotion.lastSource = source;
-  passiveMotion.lastSensorAt = Date.now();
+  passiveMotion.lastSensorAt = now;
   passiveMotion.staleWarned = false;
 
   passiveMotionWindow.push(motionScore);
@@ -456,10 +469,27 @@ function updatePassiveMotionState(sensor, source = 'unknown') {
 
   passiveMotion.score = averagedScore;
 
+  if (!passiveMotion.lastMovementAt) {
+    passiveMotion.lastMovementAt = now;
+  }
+
   let nextState = passiveMotion.state;
-  if (averagedScore >= PASSIVE_MOTION_MOVING_THRESHOLD) {
+
+  if (motionScore >= PASSIVE_MOTION_MOVING_THRESHOLD) {
+    passiveMotion.lastMovementAt = now;
     nextState = 'moving';
-  } else if (averagedScore <= PASSIVE_MOTION_STILL_THRESHOLD) {
+  } else if (
+    motionScore >= PASSIVE_ACTIVITY_RESET_THRESHOLD ||
+    averagedScore >= PASSIVE_ACTIVITY_RESET_THRESHOLD
+  ) {
+    passiveMotion.lastMovementAt = now;
+  }
+
+  if (
+    nextState === 'moving' &&
+    now - passiveMotion.lastMovementAt >= PASSIVE_STILL_DELAY_MS &&
+    averagedScore <= PASSIVE_MOTION_STILL_THRESHOLD
+  ) {
     nextState = 'still';
   } else if (!nextState) {
     nextState = 'still';
@@ -475,7 +505,8 @@ function updatePassiveMotionState(sensor, source = 'unknown') {
     `[Passive] ${nextState.toUpperCase()} avg=${averagedScore.toFixed(4)} ` +
       `raw=${motion.score.toFixed(4)} dA=${motion.accelDelta.toFixed(4)} ` +
       `eA=${motion.effectiveAccelDelta.toFixed(4)} gMag=${motion.gyroMagnitude.toFixed(4)} ` +
-      `eG=${motion.effectiveGyroMagnitude.toFixed(4)}`
+      `eG=${motion.effectiveGyroMagnitude.toFixed(4)} ` +
+      `moveAge=${now - passiveMotion.lastMovementAt}ms`
   );
   io.emit('passiveMotionState', publicPassiveMotionState());
   return true;
@@ -1093,6 +1124,6 @@ server.listen(PORT, () => {
     } (${gyroBulbControl.axis} ${gyroBulbControl.axisMin}..${gyroBulbControl.axisMax} -> 0..100%, mode=${gyroBulbControl.mode})`
   );
   console.log(
-    `[Server] Passive bulb: customizable per device (defaults still=${DEFAULT_PASSIVE_STILL_COLOR}, moving=${DEFAULT_PASSIVE_MOVING_COLOR}, window=${PASSIVE_MOTION_WINDOW_SIZE}, thresholds=${PASSIVE_MOTION_STILL_THRESHOLD}/${PASSIVE_MOTION_MOVING_THRESHOLD})`
+    `[Server] Passive bulb: customizable per device (defaults still=${DEFAULT_PASSIVE_STILL_COLOR}, moving=${DEFAULT_PASSIVE_MOVING_COLOR}, window=${PASSIVE_MOTION_WINDOW_SIZE}, thresholds=${PASSIVE_MOTION_STILL_THRESHOLD}/${PASSIVE_MOTION_MOVING_THRESHOLD}, activityReset=${PASSIVE_ACTIVITY_RESET_THRESHOLD}, stillDelayMs=${PASSIVE_STILL_DELAY_MS})`
   );
 });
