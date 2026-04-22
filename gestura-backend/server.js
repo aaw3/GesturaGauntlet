@@ -104,9 +104,6 @@ const PASSIVE_MOTION_MOVING_THRESHOLD = Number(
 const PASSIVE_MOTION_STILL_THRESHOLD = Number(
   process.env.PASSIVE_MOTION_STILL_THRESHOLD || 0.03
 );
-const PASSIVE_ACTIVITY_RESET_THRESHOLD = Number(
-  process.env.PASSIVE_ACTIVITY_RESET_THRESHOLD || 0.02
-);
 const PASSIVE_STILL_DELAY_MS = Math.max(
   0,
   Number(process.env.PASSIVE_STILL_DELAY_MS || 60_000)
@@ -409,7 +406,6 @@ function publicPassiveMotionState() {
     effectiveGyroMagnitude: Number(passiveMotion.lastEffectiveGyroMagnitude.toFixed(4)),
     accelDeadband: PASSIVE_MOTION_ACCEL_DEADBAND,
     gyroDeadbandDps: PASSIVE_MOTION_GYRO_DEADBAND_DPS,
-    activityResetThreshold: PASSIVE_ACTIVITY_RESET_THRESHOLD,
     movingThreshold: PASSIVE_MOTION_MOVING_THRESHOLD,
     stillThreshold: PASSIVE_MOTION_STILL_THRESHOLD,
     stillDelayMs: PASSIVE_STILL_DELAY_MS,
@@ -470,26 +466,15 @@ function updatePassiveMotionState(sensor, source = 'unknown') {
 
   passiveMotion.score = averagedScore;
 
-  if (!passiveMotion.lastMovementAt) {
-    passiveMotion.lastMovementAt = now;
-  }
-
   let nextState = passiveMotion.state;
 
   if (motionScore >= PASSIVE_MOTION_MOVING_THRESHOLD) {
     passiveMotion.lastMovementAt = now;
     nextState = 'moving';
   } else if (
-    motionScore >= PASSIVE_ACTIVITY_RESET_THRESHOLD ||
-    averagedScore >= PASSIVE_ACTIVITY_RESET_THRESHOLD
-  ) {
-    passiveMotion.lastMovementAt = now;
-  }
-
-  if (
     nextState === 'moving' &&
-    now - passiveMotion.lastMovementAt >= PASSIVE_STILL_DELAY_MS &&
-    averagedScore <= PASSIVE_MOTION_STILL_THRESHOLD
+    passiveMotion.lastMovementAt &&
+    now - passiveMotion.lastMovementAt >= PASSIVE_STILL_DELAY_MS
   ) {
     nextState = 'still';
   } else if (!nextState) {
@@ -507,7 +492,7 @@ function updatePassiveMotionState(sensor, source = 'unknown') {
       `raw=${motion.score.toFixed(4)} dA=${motion.accelDelta.toFixed(4)} ` +
       `eA=${motion.effectiveAccelDelta.toFixed(4)} gMag=${motion.gyroMagnitude.toFixed(4)} ` +
       `eG=${motion.effectiveGyroMagnitude.toFixed(4)} ` +
-      `moveAge=${now - passiveMotion.lastMovementAt}ms`
+      `moveAge=${passiveMotion.lastMovementAt ? now - passiveMotion.lastMovementAt : -1}ms`
   );
   io.emit('passiveMotionState', publicPassiveMotionState());
   return true;
@@ -1131,6 +1116,6 @@ server.listen(PORT, () => {
     } (${gyroBulbControl.axis} ${gyroBulbControl.axisMin}..${gyroBulbControl.axisMax} -> 0..100%, mode=${gyroBulbControl.mode})`
   );
   console.log(
-    `[Server] Passive bulb: customizable per device (defaults still=${DEFAULT_PASSIVE_STILL_COLOR}, moving=${DEFAULT_PASSIVE_MOVING_COLOR}, window=${PASSIVE_MOTION_WINDOW_SIZE}, thresholds=${PASSIVE_MOTION_STILL_THRESHOLD}/${PASSIVE_MOTION_MOVING_THRESHOLD}, activityReset=${PASSIVE_ACTIVITY_RESET_THRESHOLD}, stillDelayMs=${PASSIVE_STILL_DELAY_MS})`
+    `[Server] Passive bulb: customizable per device (defaults still=${DEFAULT_PASSIVE_STILL_COLOR}, moving=${DEFAULT_PASSIVE_MOVING_COLOR}, window=${PASSIVE_MOTION_WINDOW_SIZE}, thresholds=${PASSIVE_MOTION_STILL_THRESHOLD}/${PASSIVE_MOTION_MOVING_THRESHOLD}, stillDelayMs=${PASSIVE_STILL_DELAY_MS})`
   );
 });
