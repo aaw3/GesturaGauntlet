@@ -23,9 +23,7 @@ export default function SmartHomeScene(props: SmartHomeSceneProps) {
       }}
       style={{ background: "#0a0a12" }}
     >
-      <Suspense fallback={null}>
         <SceneContent {...props} />
-      </Suspense>
     </Canvas>
   )
 }

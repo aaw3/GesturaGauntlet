@@ -152,7 +152,7 @@ export default function SmartHomeDemoPage() {
 
 async function fetchInitialSceneState(): Promise<Partial<SmartHomeSceneProps> | null> {
   try {
-    const response = await fetch("/api/devices/state", { cache: "no-store" })
+    const response = await fetchWithTimeout("/api/devices/state", 3000)
     if (!response.ok) return null
 
     const snapshots = (await response.json()) as DeviceStateSnapshot[]
@@ -230,4 +230,18 @@ async function postDeviceAction<K extends keyof SmartHomeSceneProps>(
       value: nextValue,
     }),
   }).catch(() => undefined)
+}
+
+async function fetchWithTimeout(input: string, ms = 5000) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), ms)
+
+  try {
+    return await fetch(input, {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timeout)
+  }
 }

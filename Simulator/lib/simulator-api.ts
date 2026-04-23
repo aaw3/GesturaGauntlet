@@ -94,7 +94,7 @@ const DEVICE_DEFINITIONS: ManagedDevice[] = [
     managerId: MANAGER_ID,
     source: "simulator",
     type: "fan",
-    name: "Desk Fan",
+    name: "Ceiling Fan",
     online: "online",
     capabilities: [powerCapability(), speedCapability()],
   },
