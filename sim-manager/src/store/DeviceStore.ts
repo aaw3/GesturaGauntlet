@@ -1,97 +1,123 @@
 import {
   DeviceActionRequest,
   DeviceActionResult,
+  DeviceManagerInfo,
   DeviceStateSnapshot,
+  ManagerInterface,
   SimDevice,
 } from "../types";
-import { createFan, createFanState } from "../devices/fan";
-import { createLight, createLightState } from "../devices/light";
-import { createThermostat, createThermostatState } from "../devices/thermostat";
 
-export class DeviceStore {
-  private devices = new Map<string, SimDevice>();
-  private states = new Map<string, DeviceStateSnapshot>();
-
-  constructor(private managerId: string) {
-    const seeded = [
-      [createLight(managerId), createLightState("sim-light-1")],
-      [createFan(managerId), createFanState("sim-fan-1")],
-      [createThermostat(managerId), createThermostatState("sim-thermostat-1")],
-    ] as const;
-
-    for (const [device, state] of seeded) {
-      this.devices.set(device.id, device);
-      this.states.set(device.id, state);
-    }
-  }
-
-  listDevices(): SimDevice[] {
-    return Array.from(this.devices.values());
-  }
-
-  getDevice(deviceId: string): SimDevice | undefined {
-    return this.devices.get(deviceId);
-  }
-
-  getState(deviceId: string): DeviceStateSnapshot | undefined {
-    const state = this.states.get(deviceId);
-    return state ? { ...state, ts: Date.now() } : undefined;
-  }
-
-  applyAction(action: DeviceActionRequest): DeviceActionResult {
-    const device = this.devices.get(action.deviceId);
-    const state = this.states.get(action.deviceId);
-    if (!device || !state) {
-      return {
-        ok: false,
-        deviceId: action.deviceId,
-        capabilityId: action.capabilityId,
-        message: "Device not found",
-      };
-    }
-
-    const capability = device.capabilities.find(
-      (candidate) => candidate.id === action.capabilityId,
-    );
-    if (!capability) {
-      return {
-        ok: false,
-        deviceId: action.deviceId,
-        capabilityId: action.capabilityId,
-        message: "Capability not found",
-      };
-    }
-
-    const currentValue = state.values[action.capabilityId];
-    let nextValue: string | number | boolean | null = currentValue;
-
-    if (action.commandType === "toggle") {
-      nextValue = typeof currentValue === "boolean" ? !currentValue : true;
-    } else if (action.commandType === "delta") {
-      nextValue = clampRange(
-        Number(currentValue ?? 0) + Number(action.delta ?? 0),
-        capability.range?.min,
-        capability.range?.max,
-      );
-    } else if (action.commandType === "set") {
-      nextValue =
-        typeof action.value === "number"
-          ? clampRange(action.value, capability.range?.min, capability.range?.max)
-          : action.value ?? null;
-    }
-
-    state.values[action.capabilityId] = nextValue;
-    state.ts = Date.now();
-
-    return {
-      ok: true,
-      deviceId: action.deviceId,
-      capabilityId: action.capabilityId,
-      appliedValue: nextValue,
-    };
+export class SimulatorApiError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+    this.name = "SimulatorApiError";
   }
 }
 
-function clampRange(value: number, min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY) {
-  return Math.max(min, Math.min(max, value));
+export class DeviceStore {
+  readonly simulatorApiUrl: string;
+
+  constructor(
+    simulatorApiUrl =
+      process.env.SIMULATOR_API_URL || process.env.SIMULATOR_URL || "http://localhost:3000",
+  ) {
+    this.simulatorApiUrl = simulatorApiUrl.replace(/\/+$/, "");
+  }
+
+  async getManagerInfo(): Promise<DeviceManagerInfo> {
+    const info = await this.fetchJson<DeviceManagerInfo>("/api/manager");
+    return {
+      ...info,
+      kind: process.env.MANAGER_KIND || info.kind || "simulator",
+      metadata: {
+        ...(info.metadata || {}),
+        name: process.env.MANAGER_NAME || info.name,
+        description:
+          process.env.MANAGER_DESCRIPTION ||
+          "Simulator manager attached to a Gestura node agent.",
+        iconKey: process.env.MANAGER_ICON_KEY || "cpu",
+        colorKey: process.env.MANAGER_COLOR_KEY || "cyan",
+      },
+      interfaces: managerInterfacesFromEnv(),
+    };
+  }
+
+  async listDevices(): Promise<SimDevice[]> {
+    return this.fetchJson<SimDevice[]>("/api/devices");
+  }
+
+  async getDevice(deviceId: string): Promise<SimDevice | undefined> {
+    const devices = await this.listDevices();
+    return devices.find((device) => device.id === deviceId);
+  }
+
+  async listStates(): Promise<DeviceStateSnapshot[]> {
+    return this.fetchJson<DeviceStateSnapshot[]>("/api/devices/state");
+  }
+
+  async getState(deviceId: string): Promise<DeviceStateSnapshot | undefined> {
+    const state = await this.fetchJson<DeviceStateSnapshot | { error?: string }>(
+      `/api/devices/${encodeURIComponent(deviceId)}/state`,
+      { allowNotFound: true },
+    );
+    return "deviceId" in state ? state : undefined;
+  }
+
+  async applyAction(action: DeviceActionRequest): Promise<DeviceActionResult> {
+    return this.fetchJson<DeviceActionResult>(
+      `/api/devices/${encodeURIComponent(action.deviceId)}/actions/${encodeURIComponent(
+        action.capabilityId,
+      )}`,
+      {
+        method: "POST",
+        body: JSON.stringify(action),
+        headers: { "content-type": "application/json" },
+      },
+    );
+  }
+
+  private async fetchJson<T>(
+    path: string,
+    options: RequestInit & { allowNotFound?: boolean } = {},
+  ): Promise<T> {
+    const { allowNotFound, ...fetchOptions } = options;
+    const url = `${this.simulatorApiUrl}${path}`;
+    let response: Response;
+
+    try {
+      response = await fetch(url, fetchOptions);
+    } catch (error) {
+      throw new SimulatorApiError(
+        `Simulator API is unreachable at ${this.simulatorApiUrl}: ${
+          error instanceof Error ? error.message : "request failed"
+        }`,
+      );
+    }
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok && !(allowNotFound && response.status === 404)) {
+      throw new SimulatorApiError(
+        typeof payload?.error === "string"
+          ? payload.error
+          : `Simulator API request failed: ${response.status}`,
+        response.status,
+      );
+    }
+
+    return payload as T;
+  }
+}
+
+function managerInterfacesFromEnv() {
+  const interfaces: ManagerInterface[] = [];
+  if (process.env.MANAGER_LAN_URL) {
+    interfaces.push({ kind: "lan", url: process.env.MANAGER_LAN_URL, priority: 10 });
+  }
+  if (process.env.MANAGER_PUBLIC_URL) {
+    interfaces.push({ kind: "public", url: process.env.MANAGER_PUBLIC_URL, priority: 20 });
+  }
+  return interfaces;
 }

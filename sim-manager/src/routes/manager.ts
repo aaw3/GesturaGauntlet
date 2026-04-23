@@ -1,19 +1,17 @@
 import { Router } from "express";
+import { DeviceStore, SimulatorApiError } from "../store/DeviceStore";
 
-export function managerRouter(managerId: string) {
+export function managerRouter(store: DeviceStore) {
   const router = Router();
 
-  router.get("/", (_req, res) => {
-    res.json({
-      id: managerId,
-      name: "Simulator Manager",
-      kind: "simulator",
-      version: "1.0.0",
-      online: true,
-      supportsDiscovery: false,
-      supportsBulkActions: true,
-      integrationType: "external",
-    });
+  router.get("/", async (_req, res) => {
+    try {
+      res.json(await store.getManagerInfo());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Simulator API request failed";
+      const status = error instanceof SimulatorApiError && error.status ? error.status : 502;
+      res.status(status).json({ error: message });
+    }
   });
 
   return router;
