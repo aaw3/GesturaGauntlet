@@ -59,11 +59,6 @@ export default function LoginPage() {
         </div>
 
         <div className="grid gap-2">
-          <Label htmlFor="backendUrl">Backend URL</Label>
-          <Input id="backendUrl" value={backendUrl} onChange={(event) => setBackendUrl(event.target.value)} />
-        </div>
-
-        <div className="grid gap-2">
           <Label htmlFor="username">Username</Label>
           <Input id="username" value={username} onChange={(event) => setUsername(event.target.value)} />
         </div>
