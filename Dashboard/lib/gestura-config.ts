@@ -21,27 +21,99 @@ export interface DeviceCapability {
   writable?: boolean;
 }
 
+export type ManagerInterfaceKind = "lan" | "public";
+
+export interface ManagerInterface {
+  kind: ManagerInterfaceKind;
+  url: string;
+  priority: number;
+}
+
+export interface ManagerDisplayMetadata {
+  name: string;
+  description?: string;
+  iconKey?: string;
+  colorKey?: string;
+}
+
+export interface NodeInfo {
+  id: string;
+  name: string;
+  online: boolean;
+  lastHeartbeatAt?: string | null;
+  managerIds: string[];
+  hostedManagerCount?: number;
+  interfaces?: ManagerInterface[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface SystemStatus {
+  controlPlane: {
+    api: string;
+    uptimeSec: number;
+    startedAt: string;
+  };
+  database: {
+    configured: boolean;
+    connected: boolean;
+  };
+  grafana: {
+    enabled: boolean;
+    status: string;
+    lastError?: string | null;
+    lastSuccessAt?: string | null;
+  };
+  websocketHub: {
+    online: boolean;
+    connectedNodeCount: number;
+    connectedDashboardCount: number;
+  };
+  inventory: {
+    nodeCount: number;
+    managerCount: number;
+    deviceCount: number;
+  };
+  telemetry: {
+    recentEventCount: number;
+    recentRouteMetricCount: number;
+  };
+}
+
+export interface DeviceProvenance {
+  nodeId: string;
+  nodeName?: string;
+  managerId: string;
+  managerName?: string;
+  managerKind?: string;
+  managerIconKey?: string;
+  managerColorKey?: string;
+}
+
 export interface DeviceDefinition {
   id: string;
   managerId: string;
   source: "kasa" | "simulator" | "custom";
-  integrationType: "native" | "external";
+  integrationType: "native" | "external" | "node";
   name: string;
   kind: DeviceKind;
   capabilities: DeviceCapability[];
+  provenance?: DeviceProvenance;
+  managerInterfaces?: ManagerInterface[];
 }
 
 export interface DeviceManagerInfo {
   id: string;
+  nodeId?: string;
   name: string;
-  kind: "kasa" | "simulator" | "custom";
+  kind: string;
   version: string;
   online: boolean;
   supportsDiscovery: boolean;
   supportsBulkActions: boolean;
-  integrationType?: "native" | "external";
+  integrationType?: "native" | "external" | "node";
   baseUrl?: string;
-  metadata?: Record<string, unknown>;
+  interfaces?: ManagerInterface[];
+  metadata?: ManagerDisplayMetadata & Record<string, unknown>;
 }
 
 export interface BackendRangeSpec {
@@ -70,6 +142,8 @@ export interface BackendManagedDevice {
   online: "online" | "offline" | "unknown";
   capabilities: BackendCapability[];
   metadata?: Record<string, unknown>;
+  provenance?: DeviceProvenance;
+  managerInterfaces?: ManagerInterface[];
 }
 
 export type MappingMode =
@@ -171,6 +245,8 @@ export function mapBackendDeviceToDefinition(
     name: device.name,
     kind: mapDeviceKind(device),
     capabilities: device.capabilities.map(mapBackendCapability),
+    provenance: device.provenance,
+    managerInterfaces: device.managerInterfaces,
   };
 }
 

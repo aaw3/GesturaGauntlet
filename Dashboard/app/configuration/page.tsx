@@ -13,10 +13,7 @@ import {
   ListChecks,
   Play,
   Plug,
-  Plus,
   RefreshCw,
-  Trash2,
-  Server,
   Settings,
   SlidersHorizontal,
 } from "lucide-react";
@@ -33,8 +30,11 @@ import {
   GloveMappingContract,
   mapBackendDeviceToDefinition,
   MappingMode,
+  NodeInfo,
   sourceInputs,
+  SystemStatus,
 } from "@/lib/gestura-config";
+import { getManagerColor, getManagerIcon } from "@/lib/manager-display";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -60,21 +60,16 @@ export default function ConfigurationPage() {
   const [devices, setDevices] = useState<DeviceDefinition[]>(defaultDevices);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [mappings, setMappings] = useState<ActionMapping[]>([]);
+  const [centralMappings, setCentralMappings] = useState<GloveMappingContract[]>([]);
   const [managers, setManagers] = useState<DeviceManagerInfo[]>([]);
+  const [nodes, setNodes] = useState<NodeInfo[]>([]);
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [inventoryTab, setInventoryTab] = useState<"nodes" | "managers" | "devices" | "mappings">("nodes");
   const [backendUrl, setBackendUrl] = useState("http://localhost:3001");
-  const [kasaName, setKasaName] = useState("Kasa Lab");
-  const [externalName, setExternalName] = useState("");
-  const [externalBaseUrl, setExternalBaseUrl] = useState("");
-  const [externalAuthToken, setExternalAuthToken] = useState("");
-  const [managerStatus, setManagerStatus] = useState("No managers loaded.");
-  const [scanningKasa, setScanningKasa] = useState(false);
-  const [syncingExternalManagers, setSyncingExternalManagers] = useState<Set<string>>(new Set());
-  const [removingExternalManagers, setRemovingExternalManagers] = useState<Set<string>>(new Set());
   const [testCapabilityId, setTestCapabilityId] = useState<string>("");
   const [testValue, setTestValue] = useState<string>("");
   const [testStatus, setTestStatus] = useState("Select a device function to test.");
   const [testingFunction, setTestingFunction] = useState(false);
-  const [clockTick, setClockTick] = useState(Date.now());
 
   const selectedDevice = devices.find((device) => device.id === selectedDeviceId) ?? null;
   const testCapability = useMemo(
@@ -84,16 +79,6 @@ export default function ConfigurationPage() {
       null,
     [selectedDevice, testCapabilityId],
   );
-  const kasaManager = useMemo(
-    () => managers.find((manager) => manager.kind === "kasa" || manager.id.includes("kasa")) ?? null,
-    [managers],
-  );
-  const externalManagers = useMemo(
-    () => managers.filter((manager) => manager.integrationType === "external"),
-    [managers],
-  );
-  const kasaIsScanning = scanningKasa || getManagerBooleanMetadata(kasaManager, "isScanning");
-  const kasaLastScanned = formatLastScanned(kasaManager, clockTick, kasaIsScanning);
   const selectedDeviceMappings = useMemo(
     () =>
       selectedDevice?.capabilities.map(
@@ -159,9 +144,17 @@ export default function ConfigurationPage() {
     try {
       const managerResponse = await fetch(`${backendUrl}/api/managers`);
       const managerList = managerResponse.ok
-        ? ((await managerResponse.json()) as DeviceManagerInfo[])
-        : [];
+      ? ((await managerResponse.json()) as DeviceManagerInfo[])
+      : [];
       setManagers(managerList);
+      console.log("manager.interfaces", managerList.forEach((manager) => console.log(manager.interfaces)));;
+
+      const systemResponse = await fetch(`${backendUrl}/api/system/status`);
+      if (systemResponse.ok) setSystemStatus((await systemResponse.json()) as SystemStatus);
+
+      const nodeResponse = await fetch(`${backendUrl}/api/nodes`);
+      const nodeList = nodeResponse.ok ? ((await nodeResponse.json()) as NodeInfo[]) : [];
+      setNodes(nodeList);
 
       const deviceResponse = await fetch(`${backendUrl}/api/devices`);
       const backendDevices = deviceResponse.ok
@@ -179,137 +172,11 @@ export default function ConfigurationPage() {
           ? current
           : mappedDevices[0]?.id ?? null,
       );
-      setManagerStatus(`Loaded ${managerList.length} managers and ${mappedDevices.length} devices.`);
+      const mappingResponse = await fetch(`${backendUrl}/api/mappings`);
+      const mappingList = mappingResponse.ok ? ((await mappingResponse.json()) as GloveMappingContract[]) : [];
+      setCentralMappings(mappingList);
     } catch (error) {
-      setManagerStatus(error instanceof Error ? error.message : "Failed to load managers.");
-    }
-  };
-
-  const enableKasaManager = async () => {
-    try {
-      const response = await fetch(`${backendUrl}/api/managers/kasa`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: kasaName }),
-      });
-
-      if (!response.ok) throw new Error(`Kasa manager registration failed (${response.status})`);
-      setManagerStatus("Kasa native manager enabled.");
-      await refreshManagersAndDevices();
-    } catch (error) {
-      setManagerStatus(error instanceof Error ? error.message : "Failed to enable Kasa manager.");
-    }
-  };
-
-  const disableKasaManager = async () => {
-    if (!kasaManager) return;
-
-    try {
-      const response = await fetch(`${backendUrl}/api/managers/${kasaManager.id}`, {
-        method: "DELETE",
-      });
-
-      if (!response.ok) throw new Error(`Kasa manager disable failed (${response.status})`);
-      setManagerStatus("Kasa native manager disabled.");
-      await refreshManagersAndDevices();
-    } catch (error) {
-      setManagerStatus(error instanceof Error ? error.message : "Failed to disable Kasa manager.");
-    }
-  };
-
-  const scanKasaManager = async () => {
-    if (!kasaManager) return;
-
-    setScanningKasa(true);
-    setManagerStatus("Scanning Kasa devices now.");
-    try {
-      const response = await fetch(`${backendUrl}/api/managers/${kasaManager.id}/discover`, {
-        method: "POST",
-      });
-
-      if (!response.ok) throw new Error(`Kasa scan failed (${response.status})`);
-      setManagerStatus("Kasa scan complete.");
-      await refreshManagersAndDevices();
-    } catch (error) {
-      setManagerStatus(error instanceof Error ? error.message : "Failed to scan Kasa devices.");
-    } finally {
-      setScanningKasa(false);
-    }
-  };
-
-  const addExternalManager = async () => {
-    try {
-      const normalizedBaseUrl = normalizeExternalBaseUrl(externalBaseUrl);
-      const response = await fetch(`${backendUrl}/api/managers/external`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: externalName,
-          baseUrl: normalizedBaseUrl,
-          authToken: externalAuthToken || undefined,
-        }),
-      });
-      const payload = await response.json();
-
-      if (!response.ok || !payload.ok) {
-        throw new Error(payload.errors?.join(", ") || `External manager validation failed (${response.status})`);
-      }
-
-      setManagerStatus(`External manager added. Imported ${payload.deviceCount ?? 0} devices.`);
-      setExternalName("");
-      setExternalBaseUrl("");
-      setExternalAuthToken("");
-      await refreshManagersAndDevices();
-    } catch (error) {
-      setManagerStatus(error instanceof Error ? error.message : "Failed to add external manager.");
-    }
-  };
-
-  const reloadExternalManager = async (manager: DeviceManagerInfo) => {
-    const managerId = manager.id;
-    setSyncingExternalManagers((current) => new Set(current).add(managerId));
-    setManagerStatus(`${manager.kind === "simulator" ? "Scanning" : "Reloading"} ${managerId}.`);
-
-    try {
-      const endpoint = manager.kind === "simulator" ? "discover" : "sync";
-      const response = await fetch(`${backendUrl}/api/managers/${encodeURIComponent(managerId)}/${endpoint}`, {
-        method: "POST",
-      });
-
-      if (!response.ok) throw new Error(`External manager refresh failed (${response.status})`);
-      setManagerStatus(`External manager ${managerId} refreshed.`);
-      await refreshManagersAndDevices();
-    } catch (error) {
-      setManagerStatus(error instanceof Error ? error.message : "Failed to reload external manager.");
-    } finally {
-      setSyncingExternalManagers((current) => {
-        const next = new Set(current);
-        next.delete(managerId);
-        return next;
-      });
-    }
-  };
-
-  const removeExternalManager = async (managerId: string) => {
-    setRemovingExternalManagers((current) => new Set(current).add(managerId));
-    setManagerStatus(`Removing ${managerId}.`);
-
-    try {
-      const response = await fetch(`${backendUrl}/api/managers/${encodeURIComponent(managerId)}`, {
-        method: "DELETE",
-      });
-
-      if (!response.ok) throw new Error(`External manager remove failed (${response.status})`);
-      setManagerStatus(`External manager ${managerId} removed.`);
-      await refreshManagersAndDevices();
-    } catch (error) {
-      setManagerStatus(error instanceof Error ? error.message : "Failed to remove external manager.");
-    } finally {
-      setRemovingExternalManagers((current) => {
-        const next = new Set(current);
-        next.delete(managerId);
-        return next;
-      });
+      console.error(error instanceof Error ? error.message : "Failed to load managers.");
     }
   };
 
@@ -334,7 +201,7 @@ export default function ConfigurationPage() {
       const result = (await response.json()) as DeviceActionResult;
 
       if (!response.ok || !result.ok) {
-        throw new Error(result.message || `Action failed (${response.status})`);
+        throw new Error(result.error || result.message || `Action failed (${response.status})`);
       }
 
       setTestStatus(
@@ -371,11 +238,6 @@ export default function ConfigurationPage() {
     return () => clearInterval(interval);
   }, [backendUrl]);
 
-  useEffect(() => {
-    const interval = setInterval(() => setClockTick(Date.now()), 30_000);
-    return () => clearInterval(interval);
-  }, []);
-
   return (
     <main className="min-h-screen bg-background">
       <div className="mx-auto flex max-w-7xl flex-col gap-8 px-4 py-5 md:px-8 md:py-8">
@@ -404,192 +266,168 @@ export default function ConfigurationPage() {
           </nav>
         </header>
 
-        <section className="grid gap-4 lg:grid-cols-[1fr_1fr]">
-          <div className="rounded-lg border border-border bg-card p-5">
-            <div className="mb-5 flex items-center gap-2">
-              <Server className="size-5 text-primary" />
-              <div>
-                <h2 className="font-semibold">Native Managers</h2>
-                <p className="text-sm text-muted-foreground">Backend-hosted integrations.</p>
-              </div>
+        <section className="rounded-lg border border-border bg-card p-5">
+          <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="font-semibold">Control Plane</h2>
+              <p className="text-sm text-muted-foreground">
+                Central API, websocket hub, database, and metrics sink status.
+              </p>
             </div>
+            <Button size="sm" variant="outline" onClick={() => void refreshManagersAndDevices()}>
+              <RefreshCw className="size-4" />
+              Refresh
+            </Button>
+          </div>
 
-            <div className="rounded-md border border-border bg-background p-4">
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex min-w-0 items-center gap-3">
-                  <div className="flex size-12 shrink-0 items-center justify-center rounded-md border border-primary/25 bg-primary/10 text-primary">
-                    <Lightbulb className="size-6" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="font-semibold">Kasa</h3>
-                      <Badge
-                        variant={kasaManager ? "default" : "outline"}
-                        className={
-                          kasaManager
-                            ? "rounded-full bg-emerald-600 text-white"
-                            : "rounded-full border-muted-foreground/30 text-muted-foreground"
-                        }
-                      >
-                        {kasaManager ? "Enabled" : "Disabled"}
-                      </Badge>
-                    </div>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      Native TP-Link Kasa manager for bulbs and plugs.
-                    </p>
-                  </div>
-                </div>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <StatusTile
+              label="Central API"
+              value={systemStatus?.controlPlane.api ?? "unknown"}
+              online={systemStatus?.controlPlane.api === "online"}
+            />
+            <StatusTile
+              label="Node websocket hub"
+              value={`${systemStatus?.websocketHub.connectedNodeCount ?? 0} nodes`}
+              online={systemStatus?.websocketHub.online === true}
+            />
+            <StatusTile
+              label="Database"
+              value={systemStatus?.database.connected ? "connected" : systemStatus?.database.configured ? "disconnected" : "not configured"}
+              online={systemStatus?.database.connected === true || systemStatus?.database.configured === false}
+            />
+            <StatusTile
+              label="Grafana sink"
+              value={systemStatus?.grafana.enabled ? systemStatus.grafana.status : "disabled"}
+              online={systemStatus?.grafana.enabled ? !systemStatus.grafana.lastError : true}
+            />
+          </div>
 
-                <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-                  {kasaManager && (
-                    <Button
-                      onClick={scanKasaManager}
-                      variant="outline"
-                      className="w-full sm:w-auto"
-                      disabled={kasaIsScanning}
-                    >
-                      <RefreshCw className={`size-4 ${kasaIsScanning ? "animate-spin" : ""}`} />
-                      Scan now
-                    </Button>
-                  )}
-                  <Button
-                    onClick={kasaManager ? disableKasaManager : enableKasaManager}
-                    variant={kasaManager ? "outline" : "default"}
-                    className="w-full sm:w-auto"
-                  >
-                    {kasaManager ? (
-                      "Disable"
-                    ) : (
-                      <>
-                        <Plus className="size-4" />
-                        Enable
-                      </>
-                    )}
-                  </Button>
-                </div>
-              </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-4">
+            <InfoPill label="Nodes" value={String(systemStatus?.inventory.nodeCount ?? nodes.length)} />
+            <InfoPill label="Managers" value={String(systemStatus?.inventory.managerCount ?? managers.length)} />
+            <InfoPill label="Devices" value={String(systemStatus?.inventory.deviceCount ?? devices.length)} />
+            <InfoPill label="Telemetry events" value={String(systemStatus?.telemetry.recentEventCount ?? 0)} />
+          </div>
+        </section>
 
-              <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                <Field label="Manager name">
-                  <Input
-                    value={kasaManager?.name ?? kasaName}
-                    onChange={(event) => setKasaName(event.target.value)}
-                    disabled={Boolean(kasaManager)}
-                  />
-                </Field>
-                <Field label="Manager ID">
-                  <Input
-                    value={kasaManager?.id ?? "kasa-main"}
-                    disabled
-                    className="font-mono text-xs"
-                  />
-                </Field>
-                <Field label="Last scanned">
-                  <Input value={kasaLastScanned} disabled />
-                </Field>
-              </div>
+        <section className="rounded-lg border border-border bg-card p-5">
+          <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="font-semibold">Node Inventory</h2>
+              <p className="text-sm text-muted-foreground">
+                Nodes are real node-agent websocket registrations; central is not shown as a node.
+              </p>
+            </div>
+            <div className="grid grid-cols-4 gap-1 rounded-md border border-border bg-background p-1">
+              {(["nodes", "managers", "devices", "mappings"] as const).map((tab) => (
+                <Button
+                  key={tab}
+                  size="sm"
+                  variant={inventoryTab === tab ? "default" : "ghost"}
+                  onClick={() => setInventoryTab(tab)}
+                  className="capitalize"
+                >
+                  {tab}
+                </Button>
+              ))}
             </div>
           </div>
 
-          <div className="rounded-lg border border-border bg-card p-5">
-            <div className="mb-5 flex items-center gap-2">
-              <Server className="size-5 text-chart-2" />
-              <div>
-                <h2 className="font-semibold">External Managers</h2>
-                <p className="text-sm text-muted-foreground">Backend validates the manager API contract.</p>
-              </div>
-            </div>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Display name">
-                <Input
-                  value={externalName}
-                  onChange={(event) => setExternalName(event.target.value)}
-                  placeholder="Lab simulator"
-                />
-              </Field>
-              <Field label="Base URL">
-                <Input
-                  value={externalBaseUrl}
-                  onChange={(event) => setExternalBaseUrl(event.target.value)}
-                  className="font-mono text-xs"
-                  placeholder="http://192.168.1.42:3101"
-                />
-              </Field>
-              <Field label="Auth token">
-                <Input
-                  value={externalAuthToken}
-                  onChange={(event) => setExternalAuthToken(event.target.value)}
-                  placeholder="optional"
-                />
-              </Field>
-              <div className="flex items-end gap-2">
-                <Button onClick={addExternalManager} className="flex-1">
-                  <Plus className="size-4" />
-                  Add
-                </Button>
-              </div>
-            </div>
-            <div className="mt-5 grid gap-3">
-              {externalManagers.length === 0 && (
-                <div className="rounded-md border border-dashed border-border bg-background p-4 text-sm text-muted-foreground">
-                  No external managers registered.
+          {inventoryTab === "nodes" && (
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {nodes.map((node) => (
+                <div key={node.id} className="rounded-md border border-border bg-background p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h3 className="truncate font-semibold">{node.name}</h3>
+                      <p className="truncate font-mono text-xs text-muted-foreground">{node.id}</p>
+                    </div>
+                    <Badge variant={node.online ? "default" : "outline"}>
+                      {node.online ? "Online" : "Offline"}
+                    </Badge>
+                  </div>
+                  <div className="mt-4 grid gap-2 text-sm">
+                    <InfoRow label="Last heartbeat" value={formatTimestamp(node.lastHeartbeatAt)} />
+                    <InfoRow label="Hosted managers" value={String(node.hostedManagerCount ?? node.managerIds.length)} />
+                    <InfoRow label="Interfaces" value={formatInterfaces(node.interfaces)} />
+                  </div>
                 </div>
-              )}
-              {externalManagers.map((manager) => {
-                const isSyncing = syncingExternalManagers.has(manager.id);
-                const isRemoving = removingExternalManagers.has(manager.id);
-                const refreshLabel = manager.kind === "simulator" ? "Scan now" : "Reload";
+              ))}
+              {nodes.length === 0 && <EmptyInventory label="No nodes registered." />}
+            </div>
+          )}
 
+          {inventoryTab === "managers" && (
+            <div className="grid gap-3 md:grid-cols-2">
+              {managers.map((manager) => {
+                const Icon = getManagerIcon(manager.metadata?.iconKey);
                 return (
-                  <div
-                    key={manager.id}
-                    className="rounded-md border border-border bg-background p-4"
-                  >
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h3 className="font-semibold">{manager.name}</h3>
-                          <Badge className="rounded-full bg-chart-2 text-white">
-                            {manager.kind}
-                          </Badge>
-                          <Badge variant={manager.online ? "default" : "outline"}>
-                            {manager.online ? "Online" : "Offline"}
-                          </Badge>
-                        </div>
-                        <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
-                          {manager.id}
-                          {manager.baseUrl ? ` · ${manager.baseUrl}` : ""}
-                        </p>
+                  <div key={manager.id} className="rounded-md border border-border bg-background p-4">
+                    <div className="flex gap-3">
+                      <div className={`flex size-11 shrink-0 items-center justify-center rounded-md border ${getManagerColor(manager.metadata?.colorKey)}`}>
+                        <Icon className="size-5" />
                       </div>
-                      <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-                        <Button
-                          onClick={() => void reloadExternalManager(manager)}
-                          variant="outline"
-                          className="w-full sm:w-auto"
-                          disabled={isSyncing || isRemoving}
-                        >
-                          <RefreshCw className={`size-4 ${isSyncing ? "animate-spin" : ""}`} />
-                          {refreshLabel}
-                        </Button>
-                        <Button
-                          onClick={() => void removeExternalManager(manager.id)}
-                          variant="outline"
-                          className="w-full sm:w-auto"
-                          disabled={isRemoving || isSyncing}
-                        >
-                          <Trash2 className="size-4" />
-                          Remove
-                        </Button>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 className="font-semibold">{manager.metadata?.name ?? manager.name}</h3>
+                          <Badge variant="outline">{manager.kind}</Badge>
+                          <Badge variant={manager.online ? "default" : "outline"}>{manager.online ? "Online" : "Offline"}</Badge>
+                        </div>
+                        <p className="mt-1 text-sm text-muted-foreground">{manager.metadata?.description ?? "No description."}</p>
+                        <p className="mt-2 truncate font-mono text-xs text-muted-foreground">
+                          {manager.id} · node {manager.nodeId ?? "unknown"}
+                        </p>
+                        <p className="mt-1 truncate text-xs text-muted-foreground">
+                          {formatInterfaces(manager.interfaces)}
+                        </p>
                       </div>
                     </div>
                   </div>
                 );
               })}
+              {managers.length === 0 && <EmptyInventory label="No managers registered." />}
             </div>
-            <div className="mt-4 rounded-md border border-border bg-background p-3 text-sm text-muted-foreground">
-              {managerStatus}
+          )}
+
+          {inventoryTab === "devices" && (
+            <div className="grid gap-2">
+              {devices.map((device) => {
+                const Icon = getManagerIcon(device.provenance?.managerIconKey);
+                return (
+                  <div key={device.id} className="grid gap-3 rounded-md border border-border bg-background p-3 md:grid-cols-[1fr_220px_220px_120px] md:items-center">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <div className={`flex size-10 shrink-0 items-center justify-center rounded-md border ${getManagerColor(device.provenance?.managerColorKey)}`}>
+                        <Icon className="size-5" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium">{device.name}</div>
+                        <div className="truncate font-mono text-xs text-muted-foreground">{device.id}</div>
+                      </div>
+                    </div>
+                    <InfoRow label="Manager" value={device.provenance?.managerName ?? device.managerId} />
+                    <InfoRow label="Node" value={device.provenance?.nodeName ?? device.provenance?.nodeId ?? "unknown"} />
+                    <InfoRow label="Route" value={formatInterfaces(device.managerInterfaces)} />
+                  </div>
+                );
+              })}
+              {devices.length === 0 && <EmptyInventory label="No devices imported." />}
             </div>
-          </div>
+          )}
+
+          {inventoryTab === "mappings" && (
+            <div className="grid gap-2">
+              {centralMappings.map((mapping) => (
+                <div key={mapping.id} className="grid gap-2 rounded-md border border-border bg-background p-3 md:grid-cols-4">
+                  <InfoRow label="Input" value={mapping.inputSource} />
+                  <InfoRow label="Device" value={mapping.targetDeviceId} />
+                  <InfoRow label="Capability" value={mapping.targetCapabilityId} />
+                  <InfoRow label="Mode" value={mapping.mode} />
+                </div>
+              ))}
+              {centralMappings.length === 0 && <EmptyInventory label="No central mappings saved." />}
+            </div>
+          )}
         </section>
 
         <section className="grid gap-4 lg:grid-cols-[360px_1fr]">
@@ -597,7 +435,7 @@ export default function ConfigurationPage() {
             <div className="mb-5 flex items-center justify-between gap-3">
               <div>
                 <h2 className="font-semibold">Devices</h2>
-                <p className="text-sm text-muted-foreground">Backend-owned targets</p>
+                <p className="text-sm text-muted-foreground">Node-manager targets</p>
               </div>
               <Badge variant="outline">{devices.length}</Badge>
             </div>
@@ -605,7 +443,7 @@ export default function ConfigurationPage() {
             <div className="space-y-2">
               {devices.length === 0 && (
                 <div className="rounded-md border border-dashed border-border bg-background p-4 text-sm text-muted-foreground">
-                  No devices imported yet. Enable a native manager or add an external manager.
+                  No devices imported yet. Start a node-agent and attach a manager over websocket.
                 </div>
               )}
               {devices.map((device) => (
@@ -1137,6 +975,35 @@ function toGloveMappingContract(mapping: ActionMapping): GloveMappingContract {
   };
 }
 
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[11px] font-medium uppercase text-muted-foreground">{label}</div>
+      <div className="truncate text-sm text-foreground">{value}</div>
+    </div>
+  );
+}
+
+function EmptyInventory({ label }: { label: string }) {
+  return (
+    <div className="rounded-md border border-dashed border-border bg-background p-4 text-sm text-muted-foreground">
+      {label}
+    </div>
+  );
+}
+
+function formatTimestamp(value?: string | null) {
+  if (!value) return "Never";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "Unknown";
+  return date.toLocaleString();
+}
+
+function formatInterfaces(interfaces?: { kind: string; url: string }[]) {
+  if (!interfaces?.length) return "central routed";
+  return interfaces.map((item) => `${item.kind}: ${item.url}`).join(", ");
+}
+
 function Field({ label, children }: { label: string; children: ReactNode }) {
   const id = label.toLowerCase().replaceAll(" ", "-");
 
@@ -1194,50 +1061,20 @@ function InfoPill({ label, value, tone }: { label: string; value: string; tone?:
   );
 }
 
+function StatusTile({ label, value, online }: { label: string; value: string; online: boolean }) {
+  return (
+    <div className="rounded-md border border-border bg-background p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-xs font-medium uppercase text-muted-foreground">{label}</span>
+        <span className={`size-2 rounded-full ${online ? "bg-emerald-500" : "bg-destructive"}`} />
+      </div>
+      <div className="truncate font-mono text-sm text-foreground">{value}</div>
+    </div>
+  );
+}
+
 function managerColorClass(managerId: string) {
   if (managerId.includes("kasa")) return "bg-primary";
   if (managerId.includes("sim")) return "bg-chart-2";
   return "bg-chart-4";
-}
-
-function getManagerBooleanMetadata(
-  manager: DeviceManagerInfo | null,
-  key: string,
-): boolean {
-  return manager?.metadata?.[key] === true;
-}
-
-function getManagerStringMetadata(
-  manager: DeviceManagerInfo | null,
-  key: string,
-): string | null {
-  const value = manager?.metadata?.[key];
-  return typeof value === "string" ? value : null;
-}
-
-function formatLastScanned(
-  manager: DeviceManagerInfo | null,
-  nowMs: number,
-  isScanning: boolean,
-) {
-  if (!manager) return "Disabled";
-  if (isScanning) return "Scanning now";
-
-  const lastDiscoveryAt = getManagerStringMetadata(manager, "lastDiscoveryAt");
-  if (!lastDiscoveryAt) return "Not scanned yet";
-
-  const scannedAtMs = new Date(lastDiscoveryAt).getTime();
-  if (!Number.isFinite(scannedAtMs)) return "Unknown";
-
-  const elapsedMs = Math.max(0, nowMs - scannedAtMs);
-  const elapsedMinutes = Math.floor(elapsedMs / 60_000);
-  if (elapsedMinutes < 1) return "now";
-  if (elapsedMinutes === 1) return "1 min ago";
-  return `${elapsedMinutes} mins ago`;
-}
-
-function normalizeExternalBaseUrl(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) return trimmed;
-  return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
 }
