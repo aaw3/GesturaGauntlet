@@ -10,6 +10,10 @@ import {
   PassiveBulbConfigDevice,
   PassiveBulbConfigPanel,
 } from "@/components/dashboard/passive-bulb-config-panel";
+import {
+  ActiveBulbConfigDevice,
+  ActiveBulbConfigPanel,
+} from "@/components/dashboard/active-bulb-config-panel";
 import { Hand, Activity } from "lucide-react";
 
 // Declare socket outside to prevent constant reconnections on UI renders
@@ -23,6 +27,13 @@ interface PassiveColorConfigPayload {
   };
 }
 
+interface ActiveColorConfigPayload {
+  devices: ActiveBulbConfigDevice[];
+  defaults: {
+    activeColor: string;
+  };
+}
+
 export default function Dashboard() {
   // Changed from picoIp to brokerUrl (pointing to your Node.js server)
   const [brokerUrl, setBrokerUrl] = useState("http://localhost:3001");
@@ -30,9 +41,14 @@ export default function Dashboard() {
   const [activeMode, setActiveMode] = useState<"active" | "passive" | null>("passive");
   const [isSimulating, setIsSimulating] = useState(false);
   const [sensorData, setSensorData] = useState({ x: 0, y: 0, z: 0, gx: 0, gy: 0, gz: 0 });
+  
   const [passiveBulbs, setPassiveBulbs] = useState<PassiveBulbConfigDevice[]>([]);
   const [passiveConfigError, setPassiveConfigError] = useState<string | null>(null);
   const [savingPassiveHost, setSavingPassiveHost] = useState<string | null>(null);
+
+  const [activeBulbs, setActiveBulbs] = useState<ActiveBulbConfigDevice[]>([]);
+  const [activeConfigError, setActiveConfigError] = useState<string | null>(null);
+  const [savingActiveHost, setSavingActiveHost] = useState<string | null>(null);
 
   // --- 1. WEBSOCKET CONNECTION & LISTENERS ---
   useEffect(() => {
@@ -43,6 +59,7 @@ export default function Dashboard() {
       setNetworkStatus("connected");
       socket.emit("getMode");
       socket.emit("getPassiveColorConfig");
+      socket.emit("getActiveColorConfig");
     });
 
     socket.on("disconnect", () => {
@@ -83,6 +100,17 @@ export default function Dashboard() {
       }
     });
 
+    socket.on("activeColorConfig", (config: ActiveColorConfigPayload) => {
+      setActiveBulbs(config?.devices || []);
+      setActiveConfigError(null);
+    });
+
+    socket.on("activeColorConfigResult", (result: { success: boolean; error?: string }) => {
+      if (!result?.success && result.error) {
+        setActiveConfigError(result.error);
+      }
+    });
+
     // Cleanup on unmount
     return () => {
       if (socket) socket.disconnect();
@@ -102,6 +130,7 @@ export default function Dashboard() {
       console.log("Requesting state sync...");
       socket.emit("getMode");
       socket.emit("getPassiveColorConfig");
+      socket.emit("getActiveColorConfig");
     }
   };
 
@@ -145,6 +174,29 @@ export default function Dashboard() {
       );
     } finally {
       setSavingPassiveHost(null);
+    }
+  };
+
+  const handleActiveColorSave = async (
+    host: string,
+    colors: { activeColor: string }
+  ) => {
+    setSavingActiveHost(host);
+    setActiveConfigError(null);
+
+    try {
+      if (socket && socket.connected) {
+        socket.emit("setActiveColorConfig", {
+          host,
+          activeColor: colors.activeColor,
+        });
+      }
+    } catch (error) {
+      setActiveConfigError(
+        error instanceof Error ? error.message : "Failed to save active color."
+      );
+    } finally {
+      setSavingActiveHost(null);
     }
   };
 
@@ -251,13 +303,26 @@ export default function Dashboard() {
           </div>
 
           <div className="lg:col-span-3">
-            <PassiveBulbConfigPanel
-              devices={passiveBulbs}
-              error={passiveConfigError}
-              isSavingHost={savingPassiveHost}
-              onRefresh={handleRefresh}
-              onSave={handlePassiveColorSave}
-            />
+            <div className="grid gap-6">
+              {activeMode === "passive" && (
+                <PassiveBulbConfigPanel
+                  devices={passiveBulbs}
+                  error={passiveConfigError}
+                  isSavingHost={savingPassiveHost}
+                  onRefresh={handleRefresh}
+                  onSave={handlePassiveColorSave}
+                />
+              )}
+              {activeMode === "active" && (
+                <ActiveBulbConfigPanel
+                  devices={activeBulbs}
+                  error={activeConfigError}
+                  isSavingHost={savingActiveHost}
+                  onRefresh={handleRefresh}
+                  onSave={handleActiveColorSave}
+                />
+              )}
+            </div>
           </div>
 
           {/* Live Sensor Data - Spans 2 columns */}
@@ -281,3 +346,4 @@ export default function Dashboard() {
     </div>
   );
 }
+

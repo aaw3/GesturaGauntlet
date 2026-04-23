@@ -136,9 +136,14 @@ const DEFAULT_PASSIVE_MOVING_COLOR = normalizeHexColor(
   process.env.PASSIVE_MOTION_MOVING_COLOR,
   '#00ff00'
 );
+const DEFAULT_ACTIVE_COLOR = normalizeHexColor(
+  process.env.ACTIVE_MODE_COLOR,
+  '#0080ff'
+);
 
 const passiveMotionWindow = [];
 const passiveBulbConfigs = new Map();
+const activeBulbConfigs = new Map();
 const passiveMotion = {
   lastSample: null,
   state: null,
@@ -586,6 +591,64 @@ async function syncPassiveMotionBulb(force = false) {
   }
 }
 
+function getActiveBulbConfig(host) {
+  if (!host) return null;
+
+  if (!activeBulbConfigs.has(host)) {
+    activeBulbConfigs.set(host, {
+      host,
+      activeColor: DEFAULT_ACTIVE_COLOR,
+    });
+  }
+
+  return activeBulbConfigs.get(host);
+}
+
+function getActiveBulbConfigs() {
+  return kasa
+    .getBulbHosts()
+    .map((host) => getActiveBulbConfig(host))
+    .filter(Boolean);
+}
+
+function activeHexForBulb(host) {
+  const config = getActiveBulbConfig(host);
+  return config ? config.activeColor : DEFAULT_ACTIVE_COLOR;
+}
+
+function publicActiveColorConfig(kasaStatus = null) {
+  const bulbStatusByHost = new Map(
+    (kasaStatus?.bulbs || []).map((bulb) => [bulb.host, bulb])
+  );
+
+  return {
+    defaults: {
+      activeColor: DEFAULT_ACTIVE_COLOR,
+    },
+    devices: getActiveBulbConfigs().map((config) => {
+      const bulbStatus = bulbStatusByHost.get(config.host);
+      return {
+        ...config,
+        alias: bulbStatus?.alias || config.host,
+        connected: bulbStatus?.connected ?? false,
+        error: bulbStatus?.error,
+      };
+    }),
+  };
+}
+
+function updateActiveColorConfig(nextConfig = {}) {
+  const host = String(nextConfig.host || '').trim();
+  if (!host) {
+    throw new Error('host is required');
+  }
+
+  const config = getActiveBulbConfig(host);
+  config.activeColor = normalizeHexColor(nextConfig.activeColor, config.activeColor);
+  activeBulbConfigs.set(host, config);
+  return config;
+}
+
 async function applyModeOutputs() {
   io.emit('modeUpdate', currentMode);
   io.emit('gyroBulbControl', publicGyroBulbControl());
@@ -598,8 +661,21 @@ async function applyModeOutputs() {
   }
 
   passiveMotion.lastAppliedState = null;
+  const activeConfigs = getActiveBulbConfigs();
   await Promise.all(
-    kasa.getBulbHosts().map((host) => kasa.applyFocusedPreset({ host }))
+    activeConfigs.map(async (config) => {
+      const hexColor = config.activeColor;
+      const kasaColor = rgbToKasaColor(hexToRgb(hexColor));
+      return kasa.setBulbColor(
+        {
+          hue: kasaColor.hue,
+          saturation: kasaColor.saturation,
+          brightness: kasaColor.brightness,
+          transitionMs: 500,
+        },
+        { host: config.host }
+      );
+    })
   );
 }
 
@@ -650,10 +726,19 @@ async function sendGyroBulbBrightness(update) {
   gyroBulbControl.lastBrightness = update.brightness;
 
   try {
-    const result = await kasa.setBulbBrightness(update.brightness, {
-      transitionMs: gyroBulbControl.transitionMs,
-      powerOffAtZero: gyroBulbControl.powerOffAtZero,
-    });
+    const activeColorHex = activeHexForBulb(update.host);
+    const kasaColor = rgbToKasaColor(hexToRgb(activeColorHex));
+
+    const result = await kasa.setBulbState(
+      {
+        on_off: update.brightness > 0 ? 1 : 0,
+        hue: kasaColor.hue,
+        saturation: kasaColor.saturation,
+        brightness: update.brightness,
+        transition_period: gyroBulbControl.transitionMs,
+      },
+      { host: update.host }
+    );
 
     gyroBulbControl.lastResult = {
       ...result,
@@ -700,6 +785,7 @@ async function handleGyroBulbControl(sensor) {
   );
 
   const update = {
+    host: kasa.getPrimaryBulbHost(),
     axis: gyroBulbControl.axis,
     axisValue: rawAxis,
     smoothedAxis: gyroBulbControl.smoothedAxis,
@@ -964,6 +1050,27 @@ io.on('connection', (socket) => {
       socket.emit('passiveColorConfigResult', { success: true, passiveColorConfig: payload });
     } catch (err) {
       socket.emit('passiveColorConfigResult', { success: false, error: err.message });
+    }
+  });
+
+  socket.on('getActiveColorConfig', async () => {
+    const kasaStatus = await kasa.getDeviceStatus();
+    socket.emit('activeColorConfig', publicActiveColorConfig(kasaStatus));
+  });
+
+  socket.on('setActiveColorConfig', async (config = {}) => {
+    try {
+      updateActiveColorConfig(config);
+      if (currentMode === 'active') {
+        await applyModeOutputs();
+      }
+
+      const kasaStatus = await kasa.getDeviceStatus();
+      const payload = publicActiveColorConfig(kasaStatus);
+      io.emit('activeColorConfig', payload);
+      socket.emit('activeColorConfigResult', { success: true, activeColorConfig: payload });
+    } catch (err) {
+      socket.emit('activeColorConfigResult', { success: false, error: err.message });
     }
   });
 
