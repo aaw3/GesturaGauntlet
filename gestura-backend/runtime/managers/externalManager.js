@@ -9,6 +9,14 @@ function createExternalManager({ info, baseUrl, authToken }) {
         ...info,
         integrationType: 'external',
         baseUrl,
+        interfaces: info.interfaces || [{ kind: 'public', url: baseUrl, priority: 20 }],
+        metadata: {
+          name: info.metadata?.name || info.name,
+          description: info.metadata?.description || 'External manager reachable through the central server.',
+          iconKey: info.metadata?.iconKey || (info.kind === 'simulator' ? 'cpu' : 'server'),
+          colorKey: info.metadata?.colorKey || (info.kind === 'simulator' ? 'cyan' : 'slate'),
+          ...(info.metadata || {}),
+        },
       };
     },
 

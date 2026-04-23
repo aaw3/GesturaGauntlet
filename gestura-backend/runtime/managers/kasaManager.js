@@ -267,7 +267,7 @@ class KasaManager {
   async runDiscovery() {
     const found = new Map();
     const errors = [];
-    const collect = (device) => {
+    const collect = (s) => {
       if (!device || !allowedDevices.includes(device.deviceType)) return;
       const managed = mapKasaDevice(this.id, device);
       found.set(managed.id, { raw: device, managed });
@@ -392,12 +392,7 @@ class KasaManager {
         appliedValue: state[action.capabilityId],
       };
     } catch (err) {
-      return {
-        ok: false,
-        deviceId: action.deviceId,
-        capabilityId: action.capabilityId,
-        message: err.message,
-      };
+      return mapKasaError(err, action, raw);
     }
   }
 
@@ -419,6 +414,61 @@ class KasaManager {
 
 function createKasaManager(options) {
   return new KasaManager(options);
+}
+
+function mapKasaError(err, action, raw) {
+  const message = err?.message || 'Unknown Kasa error';
+  const host = raw?.host;
+  const port = raw?.port;
+
+  if (/TCP Timeout/i.test(message)) {
+    console.log(`[KasaManager] TCP timeout error for device ${action.deviceId} at ${host}:${port}`);
+    return {
+      ok: false,
+      status: 503,
+      code: 'DEVICE_UNREACHABLE',
+      deviceId: action.deviceId,
+      capabilityId: action.capabilityId,
+      message: 'Kasa device is offline or unreachable',
+      details: {
+        host,
+        port,
+        cause: message,
+      },
+    };
+  }
+
+  if (/ECONNREFUSED|EHOSTUNREACH|ENETUNREACH/i.test(message)) {
+    console.log(`[KasaManager] Network error for device ${action.deviceId} at ${host}:${port}: ${message}`);
+    return {
+      ok: false,
+      status: 503,
+      code: 'DEVICE_UNREACHABLE',
+      deviceId: action.deviceId,
+      capabilityId: action.capabilityId,
+      message: 'Kasa device could not be reached over the network',
+      details: {
+        host,
+        port,
+        cause: message,
+      },
+    };
+  }
+
+  console.log(`[KasaManager] Error executing action on device ${action.deviceId} at ${host}:${port}: ${message}`);
+  return {
+    ok: false,
+    status: 502,
+    code: 'KASA_ACTION_FAILED',
+    deviceId: action.deviceId,
+    capabilityId: action.capabilityId,
+    message: 'Kasa manager failed to execute action',
+    details: {
+      host,
+      port,
+      cause: message,
+    },
+  };
 }
 
 module.exports = {

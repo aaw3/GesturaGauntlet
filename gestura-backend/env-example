@@ -16,3 +16,35 @@ SENSOR_HISTORY_SIZE=200
 # Optional Postgres persistence. When unset, managers and configuration stay in memory.
 DATABASE_URL=postgres://gestura:gestura@localhost:5432/gestura
 DATABASE_SSL=false
+
+# Optional node-agent authentication. If set, node agents must send this as NODE_TOKEN.
+NODE_TOKEN=
+
+# Optional Grafana annotation upload for telemetry. Leave unset to store telemetry only in Postgres/memory.
+GRAFANA_URL=
+GRAFANA_API_KEY=
+GRAFANA_ORG_ID=
+
+# Node-agent process examples:
+# CENTRAL_API_URL=http://localhost:3001
+# CENTRAL_WS_URL=http://localhost:3001
+# NODE_ID=pi-edge-1
+# NODE_NAME=Pi Edge 1
+# NODE_TOKEN=
+# NODE_LAN_URL=http://192.168.1.25:3201
+# NODE_AGENT_PORT=3201
+# MANAGER_TOKEN=
+
+# Manager process examples:
+# NODE_AGENT_WS_URL=http://localhost:3201
+# MANAGER_ID=kasa-main
+# MANAGER_KIND=kasa
+# MANAGER_NAME=Kasa Main
+# MANAGER_TOKEN=
+# MANAGER_ICON_KEY=lightbulb
+# MANAGER_COLOR_KEY=amber
+# MANAGER_LAN_URL=http://192.168.1.25:3301
+# MANAGER_PUBLIC_URL=
+
+# Simulator manager proxy:
+# SIMULATOR_API_URL=http://localhost:3000

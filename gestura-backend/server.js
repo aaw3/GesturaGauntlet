@@ -14,12 +14,21 @@ const { ActionRouter } = require('./runtime/services/ActionRouter');
 const { MappingService } = require('./runtime/services/MappingService');
 const { SceneService } = require('./runtime/services/SceneService');
 const { PostgresStore } = require('./runtime/persistence/PostgresStore');
+const { NodeRegistry } = require('./runtime/registries/NodeRegistry');
+const { RouteMetricsService } = require('./runtime/metrics/RouteMetricsService');
+const { TelemetryService } = require('./runtime/metrics/TelemetryService');
+const { GrafanaTelemetrySink } = require('./runtime/metrics/GrafanaTelemetrySink');
+const { GloveConfigService } = require('./runtime/glove/GloveConfigService');
 const { createManagersRouter } = require('./runtime/routes/managers');
 const { createDevicesRouter } = require('./runtime/routes/devices');
 const { createMappingsRouter } = require('./runtime/routes/mappings');
 const { createScenesRouter } = require('./runtime/routes/scenes');
-const { createExternalManager } = require('./runtime/managers/externalManager');
-const { createKasaManager } = require('./runtime/managers/kasaManager');
+const { createNodesRouter } = require('./runtime/routes/nodes');
+const { createRouteMetricsRouter } = require('./runtime/routes/routeMetrics');
+const { createGlovesRouter } = require('./runtime/routes/gloves');
+const { createTelemetryRouter } = require('./runtime/routes/telemetry');
+const { createSystemRouter } = require('./runtime/routes/system');
+const { registerNodeAgentSocket } = require('./runtime/ws/nodeAgentSocket');
 
 try {
   if (typeof process.loadEnvFile === 'function') process.loadEnvFile();
@@ -30,6 +39,17 @@ try {
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+app.use((err, req, res, next) => {
+  console.error(err);
+  if (res.headersSent) return next(err);
+
+  res.status(err.status || 500).json({
+    ok: false,
+    error: err.message || 'Internal server error',
+    code: err.code || 'INTERNAL_SERVER_ERROR',
+  });
+});
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -44,11 +64,22 @@ const SENSOR_HISTORY_SIZE = Number(process.env.SENSOR_HISTORY_SIZE || 200);
 const sensorStore = new SensorStore({ historySize: SENSOR_HISTORY_SIZE });
 const persistence = new PostgresStore();
 const deviceRegistry = new DeviceRegistry({ persistence });
-const managerService = new ManagerService({ persistence });
+const nodeRegistry = new NodeRegistry({ persistence });
+const managerService = new ManagerService({ persistence, nodeRegistry });
 const deviceSyncService = new DeviceSyncService(managerService, deviceRegistry, { persistence });
-const actionRouter = new ActionRouter(managerService, deviceRegistry);
+const grafanaSink = new GrafanaTelemetrySink();
+const telemetryService = new TelemetryService({ persistence, grafanaSink });
+const routeMetricsService = new RouteMetricsService({ persistence, telemetryService });
+const actionRouter = new ActionRouter(managerService, deviceRegistry, { routeMetricsService });
 const mappingService = new MappingService({ persistence });
 const sceneService = new SceneService(actionRouter, { persistence });
+const gloveConfigService = new GloveConfigService({
+  mappingService,
+  deviceRegistry,
+  managerService,
+  persistence,
+  telemetryService,
+});
 const brokerServer = net.createServer(aedes.handle);
 
 let currentMode = 'passive';
@@ -92,8 +123,10 @@ async function handleSensorUpdate(data, source = 'unknown') {
 }
 
 function publicStatus() {
+  const system = systemStatus();
   return {
     mode: currentMode,
+    system,
     sensor: sensorStore.getState(),
     mqtt: {
       brokerUrl: `tcp://localhost:${MQTT_BROKER_PORT}`,
@@ -103,7 +136,45 @@ function publicStatus() {
       },
     },
     managers: managerService.getInfos(),
+    nodes: nodeRegistry.getAll(),
+    routeMetrics: routeMetricsService.list().slice(-20),
+    telemetry: telemetryService.list().slice(-20),
+    grafana: system.grafana,
     deviceCount: deviceRegistry.getAll().length,
+  };
+}
+
+function systemStatus() {
+  return {
+    controlPlane: {
+      api: 'online',
+      uptimeSec: Math.round(process.uptime()),
+      startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+    },
+    database: {
+      configured: Boolean(process.env.DATABASE_URL),
+      connected: persistence.enabled,
+    },
+    grafana: {
+      enabled: grafanaSink.enabled,
+      status: grafanaSink.enabled ? (grafanaSink.lastError ? 'error' : 'connected') : 'disabled',
+      lastError: grafanaSink.lastError || null,
+      lastSuccessAt: grafanaSink.lastSuccessAt || null,
+    },
+    websocketHub: {
+      online: true,
+      connectedNodeCount: io.of('/nodes').sockets.size,
+      connectedDashboardCount: io.of('/').sockets.size,
+    },
+    inventory: {
+      nodeCount: nodeRegistry.getAll().length,
+      managerCount: managerService.getInfos().length,
+      deviceCount: deviceRegistry.getAll().length,
+    },
+    telemetry: {
+      recentEventCount: telemetryService.list().length,
+      recentRouteMetricCount: routeMetricsService.list().length,
+    },
   };
 }
 
@@ -157,6 +228,8 @@ io.on('connection', (socket) => {
   socket.emit('modeUpdate', currentMode);
   socket.emit('sensorStatus', sensorStore.getState());
   socket.emit('managers', managerService.getInfos());
+  socket.emit('nodes', nodeRegistry.getAll());
+  socket.emit('devices', deviceRegistry.getAll());
   publishMode(currentMode);
 
   socket.on('getMode', () => {
@@ -214,12 +287,24 @@ const services = {
   mappingService,
   sceneService,
   persistence,
+  nodeRegistry,
+  routeMetricsService,
+  telemetryService,
+  grafanaSink,
+  gloveConfigService,
+  systemStatus,
 };
 
 app.use('/api/managers', createManagersRouter(services));
 app.use('/api/devices', createDevicesRouter(services));
 app.use('/api/mappings', createMappingsRouter(services));
 app.use('/api/scenes', createScenesRouter(services));
+app.use('/api/nodes', createNodesRouter(services));
+app.use('/api/route-metrics', createRouteMetricsRouter(services));
+app.use('/api/telemetry', createTelemetryRouter(services));
+app.use('/api/system', createSystemRouter(services));
+app.use('/api/gloves', createGlovesRouter(services));
+registerNodeAgentSocket(io, services);
 
 const PORT = Number(process.env.PORT || 3001);
 server.on('error', (err) => {
@@ -227,56 +312,33 @@ server.on('error', (err) => {
   process.exitCode = 1;
 });
 
-async function hydrateManagersFromPersistence() {
-  const managerConfigs = await persistence.listManagerConfigs();
-
-  for (const config of managerConfigs) {
-    try {
-      if (config.integrationType === 'external') {
-        await managerService.register(
-          createExternalManager({
-            info: {
-              id: config.id,
-              name: config.name,
-              kind: config.kind,
-              version: config.version,
-              online: config.online,
-              supportsDiscovery: config.supportsDiscovery,
-              supportsBulkActions: config.supportsBulkActions,
-              integrationType: 'external',
-              metadata: config.metadata,
-            },
-            baseUrl: config.baseUrl,
-            authToken: config.authToken,
-          }),
-          config,
-        );
-      } else if (config.kind === 'kasa') {
-        await managerService.register(
-          createKasaManager({
-            id: config.id,
-            name: config.name,
-            discoveryTimeoutMs: Number(config.config?.discoveryTimeoutMs || 3000),
-            scanIntervalMs: Number(config.config?.scanIntervalMs || 5 * 60 * 1000),
-          }),
-          config,
-        );
-      }
-
-      await deviceSyncService.syncManager(config.id);
-    } catch (err) {
-      console.error(`[Persistence] Failed to hydrate manager ${config.id}: ${err.message}`);
-    }
-  }
-}
-
 async function start() {
   try {
     const persistenceEnabled = await persistence.init();
     if (persistenceEnabled) {
+      for (const node of await persistence.listNodes()) {
+        nodeRegistry.upsert({ ...node, online: false });
+      }
+      for (const config of await persistence.listManagerConfigs()) {
+        if (config.nodeId) {
+          await managerService.registerSnapshot({
+            id: config.id,
+            nodeId: config.nodeId,
+            name: config.name,
+            kind: config.kind,
+            version: config.version,
+            online: false,
+            supportsDiscovery: config.supportsDiscovery,
+            supportsBulkActions: config.supportsBulkActions,
+            integrationType: 'node',
+            metadata: config.metadata,
+            interfaces: config.interfaces,
+          });
+        }
+      }
+      await deviceRegistry.upsertMany(await persistence.listManagedDevices());
       await mappingService.loadPersisted();
       await sceneService.loadPersisted();
-      await hydrateManagersFromPersistence();
       console.log('[Persistence] Postgres persistence enabled.');
     } else {
       console.log('[Persistence] DATABASE_URL not set; using in-memory managers and configuration.');

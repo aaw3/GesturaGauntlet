@@ -1,5 +1,6 @@
 import { ID, TimestampMs } from "./common";
 import { ManagedDevice } from "./device";
+import { ManagerDisplayMetadata, ManagerInterface } from "./topology";
 
 export interface DeviceStateSnapshot {
   deviceId: ID;
@@ -9,15 +10,17 @@ export interface DeviceStateSnapshot {
 
 export interface DeviceManagerInfo {
   id: ID;
-  name: string;
-  kind: "kasa" | "simulator" | "custom";
+  nodeId: ID;
+  name?: string;
+  kind: string;
   version: string;
   online: boolean;
+  interfaces: ManagerInterface[];
+  metadata: ManagerDisplayMetadata & Record<string, unknown>;
   supportsDiscovery: boolean;
   supportsBulkActions: boolean;
-  integrationType?: "native" | "external";
+  integrationType?: "native" | "external" | "node";
   baseUrl?: string;
-  metadata?: Record<string, unknown>;
 }
 
 export interface ManagerSyncResult {
@@ -37,7 +40,7 @@ export interface AddExternalManagerRequest {
 
 export interface CreateManagerRequest extends AddExternalManagerRequest {
   id: ID;
-  kind: "simulator" | "custom";
+  kind: string;
 }
 
 export interface AddNativeKasaManagerRequest {

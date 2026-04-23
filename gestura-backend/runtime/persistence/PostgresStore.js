@@ -81,13 +81,49 @@ class PostgresStore {
     if (!this.pool) return [];
 
     const result = await this.pool.query(`
-      SELECT id, name, kind, integration_type, version, online, supports_discovery,
-        supports_bulk_actions, base_url, auth_token, config, metadata
-      FROM device_managers
-      ORDER BY created_at ASC
+      SELECT dm.id, dm.name, dm.kind, dm.integration_type, dm.version, dm.online,
+        dm.supports_discovery, dm.supports_bulk_actions, dm.base_url, dm.auth_token,
+        dm.config, dm.metadata, dm.node_id,
+        COALESCE(
+          jsonb_agg(
+            jsonb_build_object(
+              'kind', mi.kind,
+              'url', mi.url,
+              'priority', mi.priority
+            )
+          ) FILTER (WHERE mi.id IS NOT NULL),
+          '[]'::jsonb
+        ) AS interfaces
+      FROM device_managers dm
+      LEFT JOIN manager_interfaces mi ON mi.manager_id = dm.id
+      GROUP BY dm.id
+      ORDER BY dm.created_at ASC
     `);
 
     return result.rows.map(rowToManagerConfig);
+  }
+
+  async listNodes() {
+    if (!this.pool) return [];
+    const result = await this.pool.query(`
+      SELECT id, name, online, last_seen_at, metadata
+      FROM nodes
+      ORDER BY created_at ASC
+    `);
+    return result.rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      online: row.online,
+      lastHeartbeatAt: row.last_seen_at ? row.last_seen_at.toISOString() : null,
+      managerIds: [],
+      metadata: row.metadata || {},
+    }));
+  }
+
+  async listManagedDevices() {
+    if (!this.pool) return [];
+    const result = await this.pool.query('SELECT payload FROM managed_devices ORDER BY created_at ASC');
+    return result.rows.map((row) => row.payload);
   }
 
   async upsertManagerConfig({ info, baseUrl, authToken, config = {} }) {
@@ -97,9 +133,10 @@ class PostgresStore {
       `
         INSERT INTO device_managers (
           id, name, kind, integration_type, version, online, supports_discovery,
-          supports_bulk_actions, base_url, auth_token, config, metadata, updated_at
+          supports_bulk_actions, base_url, auth_token, config, metadata, node_id,
+          display_name, description, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, now())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13, $14, $15, now())
         ON CONFLICT (id) DO UPDATE SET
           name = EXCLUDED.name,
           kind = EXCLUDED.kind,
@@ -112,6 +149,9 @@ class PostgresStore {
           auth_token = EXCLUDED.auth_token,
           config = EXCLUDED.config,
           metadata = EXCLUDED.metadata,
+          node_id = EXCLUDED.node_id,
+          display_name = EXCLUDED.display_name,
+          description = EXCLUDED.description,
           updated_at = now()
       `,
       [
@@ -127,8 +167,13 @@ class PostgresStore {
         authToken || null,
         JSON.stringify(config),
         JSON.stringify(info.metadata || {}),
+        info.nodeId || config.nodeId || null,
+        info.metadata?.name || info.name || info.id,
+        info.metadata?.description || null,
       ],
     );
+
+    await this.replaceManagerInterfaces(info.id, info.interfaces || []);
   }
 
   async deleteManagerConfig(managerId) {
@@ -155,6 +200,46 @@ class PostgresStore {
           `,
           [device.id, managerId, JSON.stringify(device), device.online || 'unknown'],
         );
+        await client.query(
+          `
+            UPDATE managed_devices
+            SET node_id = $2,
+              type = $3,
+              name = $4,
+              metadata = $5::jsonb
+            WHERE id = $1
+          `,
+          [
+            device.id,
+            device.provenance?.nodeId || null,
+            device.type || null,
+            device.name || null,
+            JSON.stringify(device.metadata || {}),
+          ],
+        );
+        await client.query('DELETE FROM device_capabilities WHERE device_id = $1', [device.id]);
+        for (const capability of device.capabilities || []) {
+          await client.query(
+            `
+              INSERT INTO device_capabilities (
+                device_id, capability_id, label, kind, config_json, updated_at
+              )
+              VALUES ($1, $2, $3, $4, $5::jsonb, now())
+              ON CONFLICT (device_id, capability_id) DO UPDATE SET
+                label = EXCLUDED.label,
+                kind = EXCLUDED.kind,
+                config_json = EXCLUDED.config_json,
+                updated_at = now()
+            `,
+            [
+              device.id,
+              capability.id,
+              capability.label || capability.id,
+              capability.kind || capability.type || 'custom',
+              JSON.stringify(capability),
+            ],
+          );
+        }
       }
       await client.query(
         `
@@ -266,6 +351,127 @@ class PostgresStore {
     await this.pool.query('DELETE FROM glove_mappings WHERE id = $1', [mappingId]);
   }
 
+  async upsertNode(node) {
+    if (!this.pool) return;
+    await this.pool.query(
+      `
+        INSERT INTO nodes (id, name, online, last_seen_at, metadata, updated_at)
+        VALUES ($1, $2, $3, $4, $5::jsonb, now())
+        ON CONFLICT (id) DO UPDATE SET
+          name = EXCLUDED.name,
+          online = EXCLUDED.online,
+          last_seen_at = EXCLUDED.last_seen_at,
+          metadata = EXCLUDED.metadata,
+          updated_at = now()
+      `,
+      [
+        node.id,
+        node.name || node.id,
+        node.online !== false,
+        node.lastHeartbeatAt || node.lastSeenAt || new Date().toISOString(),
+        JSON.stringify(node.metadata || {}),
+      ],
+    );
+  }
+
+  async replaceManagerInterfaces(managerId, interfaces = []) {
+    if (!this.pool) return;
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM manager_interfaces WHERE manager_id = $1', [managerId]);
+      for (const iface of interfaces) {
+        if (!iface?.url || (iface.kind !== 'lan' && iface.kind !== 'public')) continue;
+        await client.query(
+          `
+            INSERT INTO manager_interfaces (manager_id, kind, url, priority, updated_at)
+            VALUES ($1, $2, $3, $4, now())
+            ON CONFLICT (manager_id, kind, url) DO UPDATE SET
+              priority = EXCLUDED.priority,
+              updated_at = now()
+          `,
+          [managerId, iface.kind, iface.url, Number(iface.priority ?? 100)],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async saveRouteAttemptMetric(metric) {
+    if (!this.pool) return;
+    await this.pool.query(
+      `
+        INSERT INTO route_attempt_metrics (
+          id, manager_id, node_id, device_id, attempted_route, final_route,
+          success, latency_ms, error, message, payload, created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, to_timestamp($12 / 1000.0))
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [
+        metric.id,
+        metric.managerId,
+        metric.nodeId || null,
+        metric.deviceId || null,
+        metric.attemptedRoute || 'public',
+        metric.finalRoute || null,
+        metric.success === true,
+        Number.isFinite(Number(metric.latencyMs)) ? Number(metric.latencyMs) : null,
+        metric.error || null,
+        metric.message || null,
+        JSON.stringify(metric),
+        metric.ts || Date.now(),
+      ],
+    );
+  }
+
+  async saveTelemetryEvents(events = []) {
+    if (!this.pool || events.length === 0) return;
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const event of events) {
+        await client.query(
+          `
+            INSERT INTO telemetry_events (id, node_id, manager_id, event_type, payload, created_at)
+            VALUES ($1, $2, $3, $4, $5::jsonb, to_timestamp($6 / 1000.0))
+            ON CONFLICT (id) DO NOTHING
+          `,
+          [
+            event.id,
+            event.nodeId || null,
+            event.managerId || null,
+            event.eventType,
+            JSON.stringify(event.payload || event),
+            event.ts || Date.now(),
+          ],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async savePassiveMetricUpload(gloveId, payload) {
+    if (!this.pool) return;
+    await this.pool.query(
+      `
+        INSERT INTO passive_metric_uploads (id, glove_id, payload_json)
+        VALUES ($1, $2, $3::jsonb)
+      `,
+      [payload.id, gloveId, JSON.stringify(payload)],
+    );
+  }
+
   async listScenes() {
     if (!this.pool) return [];
     const result = await this.pool.query('SELECT payload FROM scenes ORDER BY created_at ASC');
@@ -302,6 +508,8 @@ function rowToManagerConfig(row) {
     authToken: row.auth_token,
     config: row.config || {},
     metadata: row.metadata || {},
+    nodeId: row.node_id,
+    interfaces: row.interfaces || [],
   };
 }
 

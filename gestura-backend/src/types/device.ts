@@ -1,4 +1,5 @@
 import { ID, OnlineStatus, RangeSpec } from "./common";
+import { DeviceProvenance, ManagerInterface } from "./topology";
 
 export type CapabilityKind = "toggle" | "range" | "color" | "discrete" | "scene";
 
@@ -46,11 +47,13 @@ export type DeviceCapability =
 export interface ManagedDevice {
   id: ID;
   managerId: ID;
-  source: "kasa" | "simulator" | "custom";
+  source: string;
   type: "light" | "plug" | "fan" | "thermostat" | "scene" | "other";
   name: string;
   room?: string;
   online: OnlineStatus;
   capabilities: DeviceCapability[];
   metadata?: Record<string, unknown>;
+  provenance?: DeviceProvenance;
+  managerInterfaces?: ManagerInterface[];
 }

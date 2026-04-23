@@ -29,9 +29,17 @@ export class KasaDeviceManager implements DeviceManager {
       kind: "kasa",
       version: "1.0.0",
       online: true,
+      nodeId: "node-agent-required",
+      interfaces: [],
+      metadata: {
+        name: this.options.name ?? "Kasa Manager",
+        description: "TP-Link Kasa bulbs and plugs hosted by a node agent.",
+        iconKey: "lightbulb",
+        colorKey: "amber",
+      },
       supportsDiscovery: true,
       supportsBulkActions: false,
-      integrationType: "native",
+      integrationType: "node",
     };
   }
 

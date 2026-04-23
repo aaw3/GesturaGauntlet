@@ -23,6 +23,19 @@ export class SimulatorDeviceManager implements DeviceManager {
         name: this.options.name ?? this.options.managerInfo.name,
         integrationType: "external",
         baseUrl: this.options.baseUrl ?? this.options.managerInfo.baseUrl,
+        nodeId: this.options.managerInfo.nodeId ?? "node-agent-required",
+        interfaces: this.options.managerInfo.interfaces?.length
+          ? this.options.managerInfo.interfaces
+          : this.options.baseUrl
+            ? [{ kind: "public", url: this.options.baseUrl, priority: 20 }]
+            : [],
+        metadata: {
+          name: this.options.name ?? this.options.managerInfo.metadata?.name ?? this.options.managerInfo.name ?? "Simulator Manager",
+          description: this.options.managerInfo.metadata?.description ?? "Simulator devices exposed through the manager contract.",
+          iconKey: this.options.managerInfo.metadata?.iconKey ?? "cpu",
+          colorKey: this.options.managerInfo.metadata?.colorKey ?? "cyan",
+          ...this.options.managerInfo.metadata,
+        },
       };
     }
 
@@ -34,6 +47,19 @@ export class SimulatorDeviceManager implements DeviceManager {
         name: this.options.name ?? info.name,
         integrationType: "external",
         baseUrl: this.options.baseUrl ?? info.baseUrl,
+        nodeId: info.nodeId ?? "node-agent-required",
+        interfaces: info.interfaces?.length
+          ? info.interfaces
+          : this.options.baseUrl
+            ? [{ kind: "public", url: this.options.baseUrl, priority: 20 }]
+            : [],
+        metadata: {
+          name: this.options.name ?? info.metadata?.name ?? info.name ?? "Simulator Manager",
+          description: info.metadata?.description ?? "Simulator devices exposed through the manager contract.",
+          iconKey: info.metadata?.iconKey ?? "cpu",
+          colorKey: info.metadata?.colorKey ?? "cyan",
+          ...info.metadata,
+        },
       };
     } catch {
       // Fall back to configured metadata so a temporarily offline external
@@ -46,6 +72,14 @@ export class SimulatorDeviceManager implements DeviceManager {
       kind: "simulator",
       version: "1.0.0",
       online: true,
+      nodeId: "node-agent-required",
+      interfaces: this.options.baseUrl ? [{ kind: "public", url: this.options.baseUrl, priority: 20 }] : [],
+      metadata: {
+        name: this.options.name ?? "Simulator Manager",
+        description: "Simulator devices exposed through the manager contract.",
+        iconKey: "cpu",
+        colorKey: "cyan",
+      },
       supportsDiscovery: false,
       supportsBulkActions: true,
       integrationType: "external",

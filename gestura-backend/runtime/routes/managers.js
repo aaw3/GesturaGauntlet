@@ -1,6 +1,4 @@
 const express = require('express');
-const { createExternalManager, validateExternalManager } = require('../managers/externalManager');
-const { createKasaManager } = require('../managers/kasaManager');
 
 function createManagersRouter({ managerService, deviceRegistry, deviceSyncService }) {
   const router = express.Router();
@@ -10,69 +8,16 @@ function createManagersRouter({ managerService, deviceRegistry, deviceSyncServic
   });
 
   router.post('/kasa', async (req, res) => {
-    const name = String(req.body?.name || '').trim();
-    const id = String(req.body?.id || 'kasa-main').trim() || 'kasa-main';
-
-    if (!name) {
-      res.status(400).json({ error: 'Kasa manager name is required' });
-      return;
-    }
-
-    const manager = createKasaManager({
-      id,
-      name,
-      discoveryTimeoutMs: Number(req.body?.discoveryTimeoutMs || 3000),
-      scanIntervalMs: Number(req.body?.scanIntervalMs || 5 * 60 * 1000),
+    res.status(410).json({
+      error: 'Kasa managers now run as standalone manager services and attach to node-agent over websocket.',
+      expectedFlow: 'Start kasa-manager with NODE_AGENT_WS_URL and MANAGER_* env vars.',
     });
-
-    const existing = managerService.get(id);
-    if (existing) {
-      await managerService.unregister(id);
-      await deviceRegistry.clearManagerDevices(id);
-    }
-
-    await managerService.register(manager, {
-      kind: 'kasa',
-      integrationType: 'native',
-      discoveryTimeoutMs: Number(req.body?.discoveryTimeoutMs || 3000),
-      scanIntervalMs: Number(req.body?.scanIntervalMs || 5 * 60 * 1000),
-    });
-    const sync = await deviceSyncService.syncManager(id);
-    manager.startAutoDiscovery(() => deviceSyncService.syncManager(id));
-
-    res.status(201).json({ ...manager.getInfo(), sync });
   });
 
   router.post('/external', async (req, res) => {
-    const validation = await validateExternalManager({
-      name: req.body?.name,
-      baseUrl: req.body?.baseUrl,
-      authToken: req.body?.authToken,
-    });
-
-    if (!validation.ok || !validation.managerInfo) {
-      res.status(400).json(validation);
-      return;
-    }
-
-    const manager = createExternalManager({
-      info: validation.managerInfo,
-      baseUrl: req.body.baseUrl,
-      authToken: req.body?.authToken,
-    });
-    await managerService.register(manager, {
-      kind: validation.managerInfo.kind,
-      integrationType: 'external',
-      baseUrl: req.body.baseUrl,
-      authToken: req.body?.authToken,
-    });
-    const sync = await deviceSyncService.syncManager(validation.managerInfo.id);
-
-    res.status(201).json({
-      ok: true,
-      manager: manager.getInfo(),
-      deviceCount: validation.deviceCount,
-      sync,
+    res.status(410).json({
+      error: 'HTTP external managers are deprecated. Managers must attach to node-agent over websocket.',
+      expectedFlow: 'Start a manager process with NODE_AGENT_WS_URL and MANAGER_* env vars.',
     });
   });
 
