@@ -24,6 +24,9 @@ const io = new Server(server, {
 // --- MQTT TOPICS ---
 const MQTT_TOPIC_SENSORS = 'gauntlet/sensors';
 const MQTT_TOPIC_MODE = 'gauntlet/mode';
+const SERVER_STARTED_AT = new Date();
+const LOCAL_NODE_ID = 'local-backend';
+const KASA_MANAGER_ID = 'kasa-main';
 
 function resolveBrokerPort() {
   const explicitPort = Number(process.env.MQTT_BROKER_PORT);
@@ -1135,6 +1138,372 @@ function updateGyroBulbControl(nextConfig = {}) {
   return publicGyroBulbControl();
 }
 
+function sanitizeId(value, fallback = 'device') {
+  const normalized = String(value || fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || fallback;
+}
+
+function rangeCapability(id, label, min, max, step, unit) {
+  return {
+    id,
+    label,
+    kind: 'range',
+    readable: true,
+    writable: true,
+    range: { min, max, step, unit },
+  };
+}
+
+function kasaBulbCapabilities() {
+  return [
+    { id: 'power', label: 'Power', kind: 'toggle', readable: true, writable: true },
+    rangeCapability('brightness', 'Brightness', 0, 100, 1, '%'),
+    rangeCapability('hue', 'Hue', 0, 360, 1, 'deg'),
+    rangeCapability('saturation', 'Saturation', 0, 100, 1, '%'),
+    rangeCapability('color_temp', 'Color temperature', 2500, 9000, 100, 'K'),
+  ];
+}
+
+function kasaPlugCapabilities() {
+  return [
+    { id: 'power', label: 'Power', kind: 'toggle', readable: true, writable: true },
+  ];
+}
+
+function kasaManagerInterfaces() {
+  return [{ kind: 'lan', url: 'fixed-ip-env', priority: 1 }];
+}
+
+function managedBulbDeviceId(host) {
+  return `${KASA_MANAGER_ID}-bulb-${sanitizeId(host, 'bulb')}`;
+}
+
+function managedPlugDeviceId() {
+  return `${KASA_MANAGER_ID}-plug`;
+}
+
+function publicKasaManagerInfo() {
+  return {
+    id: KASA_MANAGER_ID,
+    nodeId: LOCAL_NODE_ID,
+    name: 'Kasa Local',
+    kind: 'kasa',
+    version: 'fixed-ip-v1',
+    online: true,
+    supportsDiscovery: false,
+    supportsBulkActions: true,
+    integrationType: 'native',
+    interfaces: kasaManagerInterfaces(),
+    metadata: {
+      name: 'Kasa Local',
+      description: 'Fixed-IP Kasa devices configured from gestura-backend/.env.',
+      iconKey: 'lightbulb',
+      colorKey: 'amber',
+    },
+  };
+}
+
+function publicLocalNodes() {
+  return [
+    {
+      id: LOCAL_NODE_ID,
+      name: 'Local Gestura Backend',
+      online: true,
+      lastHeartbeatAt: new Date().toISOString(),
+      managerIds: [KASA_MANAGER_ID],
+      hostedManagerCount: 1,
+      interfaces: [{ kind: 'lan', url: `http://localhost:${PORT}`, priority: 1 }],
+      metadata: {
+        role: 'backend',
+      },
+    },
+  ];
+}
+
+function deviceOnlineState(status = {}) {
+  if (status.connected) return 'online';
+  if (status.error) return 'offline';
+  return 'unknown';
+}
+
+function deviceProvenance() {
+  return {
+    nodeId: LOCAL_NODE_ID,
+    nodeName: 'Local Gestura Backend',
+    managerId: KASA_MANAGER_ID,
+    managerName: 'Kasa Local',
+    managerKind: 'kasa',
+    managerIconKey: 'lightbulb',
+    managerColorKey: 'amber',
+  };
+}
+
+function buildManagedDevices(kasaStatus = null) {
+  const manager = publicKasaManagerInfo();
+  const devices = [];
+  const provenance = deviceProvenance();
+
+  if (process.env.PLUG_IP) {
+    const plugStatus = kasaStatus?.plug || {};
+    devices.push({
+      id: managedPlugDeviceId(),
+      managerId: KASA_MANAGER_ID,
+      source: 'kasa',
+      type: 'plug',
+      name: plugStatus.alias || 'Kasa Plug',
+      online: deviceOnlineState(plugStatus),
+      capabilities: kasaPlugCapabilities(),
+      metadata: {
+        host: process.env.PLUG_IP,
+        configured: true,
+        power: plugStatus.power,
+        error: plugStatus.error,
+      },
+      provenance: {
+        ...provenance,
+        managerIconKey: 'plug',
+      },
+      managerInterfaces: manager.interfaces,
+    });
+  }
+
+  const bulbStatusByHost = new Map(
+    (kasaStatus?.bulbs || []).map((bulbStatus) => [bulbStatus.host, bulbStatus])
+  );
+
+  for (const host of kasa.getBulbHosts()) {
+    const bulbStatus = bulbStatusByHost.get(host) || {};
+    devices.push({
+      id: managedBulbDeviceId(host),
+      managerId: KASA_MANAGER_ID,
+      source: 'kasa',
+      type: 'light',
+      name: bulbStatus.alias || `Kasa Bulb ${host}`,
+      online: deviceOnlineState(bulbStatus),
+      capabilities: kasaBulbCapabilities(),
+      metadata: {
+        host,
+        configured: true,
+        lastState: bulbStatus.lastState || {},
+        sysInfo: bulbStatus.sysInfo,
+        error: bulbStatus.error,
+      },
+      provenance,
+      managerInterfaces: manager.interfaces,
+    });
+  }
+
+  return devices;
+}
+
+function publicSystemStatus() {
+  const devices = buildManagedDevices();
+  return {
+    controlPlane: {
+      api: 'online',
+      uptimeSec: Math.round((Date.now() - SERVER_STARTED_AT.getTime()) / 1000),
+      startedAt: SERVER_STARTED_AT.toISOString(),
+    },
+    database: {
+      configured: false,
+      connected: false,
+    },
+    grafana: {
+      enabled: false,
+      status: 'disabled',
+      lastError: null,
+      lastSuccessAt: null,
+    },
+    websocketHub: {
+      online: true,
+      connectedNodeCount: 1,
+      connectedDashboardCount: io.of('/').sockets.size,
+    },
+    inventory: {
+      nodeCount: 1,
+      managerCount: 1,
+      deviceCount: devices.length,
+    },
+    telemetry: {
+      recentEventCount: sensorHistory.length,
+      recentRouteMetricCount: 0,
+    },
+  };
+}
+
+async function getSafeKasaStatus() {
+  try {
+    return await kasa.getDeviceStatus();
+  } catch (err) {
+    return {
+      plug: {
+        configured: Boolean(process.env.PLUG_IP),
+        connected: false,
+        error: err.message,
+      },
+      bulb: { configured: false, connected: false, lastState: {}, error: err.message },
+      bulbs: kasa.getBulbHosts().map((host) => ({
+        host,
+        configured: true,
+        connected: false,
+        lastState: {},
+        error: err.message,
+      })),
+    };
+  }
+}
+
+function resolveManagedDeviceRef(deviceId) {
+  if (deviceId === managedPlugDeviceId() && process.env.PLUG_IP) {
+    return { type: 'plug', id: deviceId, host: process.env.PLUG_IP };
+  }
+
+  for (const host of kasa.getBulbHosts()) {
+    if (deviceId === managedBulbDeviceId(host)) {
+      return { type: 'bulb', id: deviceId, host };
+    }
+  }
+
+  return null;
+}
+
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, toFiniteNumber(value, min)));
+}
+
+function coerceActionBoolean(value) {
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  return Boolean(value);
+}
+
+function actionResponse(deviceId, capabilityId, result, appliedValue) {
+  if (!result?.success) {
+    return {
+      ok: false,
+      deviceId,
+      capabilityId,
+      error: result?.error || 'Device action failed',
+      message: result?.error || 'Device action failed',
+    };
+  }
+
+  return {
+    ok: true,
+    deviceId,
+    capabilityId,
+    appliedValue,
+    message: 'Action applied',
+    result,
+  };
+}
+
+async function executeManagedDeviceAction(deviceId, capabilityId, body = {}) {
+  const ref = resolveManagedDeviceRef(deviceId);
+  if (!ref) {
+    const err = new Error(`Device not found: ${deviceId}`);
+    err.status = 404;
+    throw err;
+  }
+
+  const commandType = String(body.commandType || 'set').toLowerCase();
+  if (commandType !== 'set') {
+    const err = new Error(`Unsupported command type: ${commandType}`);
+    err.status = 400;
+    throw err;
+  }
+
+  if (ref.type === 'plug') {
+    if (capabilityId !== 'power') {
+      const err = new Error(`Unsupported plug capability: ${capabilityId}`);
+      err.status = 400;
+      throw err;
+    }
+
+    const nextPower = coerceActionBoolean(body.value);
+    const result = await kasa.setPlugPower(nextPower);
+    return actionResponse(deviceId, capabilityId, result, result?.state ?? nextPower);
+  }
+
+  if (ref.type !== 'bulb') {
+    const err = new Error(`Unsupported device type: ${ref.type}`);
+    err.status = 400;
+    throw err;
+  }
+
+  if (capabilityId === 'power') {
+    const nextPower = coerceActionBoolean(body.value);
+    const result = await kasa.setBulbPower(nextPower, {
+      host: ref.host,
+      transitionMs: 0,
+    });
+    return actionResponse(deviceId, capabilityId, result, nextPower);
+  }
+
+  if (capabilityId === 'brightness') {
+    const brightness = Math.round(clampNumber(body.value, 0, 100));
+    const result = await kasa.setBulbBrightness(brightness, {
+      host: ref.host,
+      transitionMs: 0,
+      powerOffAtZero: true,
+    });
+    return actionResponse(deviceId, capabilityId, result, result?.lightState?.brightness ?? brightness);
+  }
+
+  if (capabilityId === 'hue') {
+    const hue = Math.round(clampNumber(body.value, 0, 360));
+    const result = await kasa.setBulbState(
+      {
+        on_off: 1,
+        color_temp: 0,
+        hue,
+        saturation: 100,
+        transition_period: 0,
+      },
+      { host: ref.host }
+    );
+    return actionResponse(deviceId, capabilityId, result, result?.lightState?.hue ?? hue);
+  }
+
+  if (capabilityId === 'saturation') {
+    const saturation = Math.round(clampNumber(body.value, 0, 100));
+    const result = await kasa.setBulbState(
+      {
+        on_off: 1,
+        color_temp: 0,
+        saturation,
+        transition_period: 0,
+      },
+      { host: ref.host }
+    );
+    return actionResponse(
+      deviceId,
+      capabilityId,
+      result,
+      result?.lightState?.saturation ?? saturation
+    );
+  }
+
+  if (capabilityId === 'color_temp') {
+    const colorTemp = Math.round(clampNumber(body.value, 2500, 9000));
+    const result = await kasa.setBulbColorTemperature(colorTemp, {
+      host: ref.host,
+      transitionMs: 0,
+    });
+    return actionResponse(deviceId, capabilityId, result, result?.lightState?.color_temp ?? colorTemp);
+  }
+
+  const err = new Error(`Unsupported bulb capability: ${capabilityId}`);
+  err.status = 400;
+  throw err;
+}
+
 // MQTT Broker (embedded - no external Mosquitto needed)
 brokerServer.on('error', (err) => {
   console.error(`[MQTT] Broker failed on port ${MQTT_BROKER_PORT}: ${err.message}`);
@@ -1353,6 +1722,85 @@ app.post('/api/mode', (req, res) => {
     activeControl: publicActiveControlState(),
     passiveMotion: publicPassiveMotionState(),
   });
+});
+
+app.get('/api/managers', (req, res) => {
+  res.json([publicKasaManagerInfo()]);
+});
+
+app.get('/api/system/status', (req, res) => {
+  res.json(publicSystemStatus());
+});
+
+app.get('/api/nodes', (req, res) => {
+  res.json(publicLocalNodes());
+});
+
+app.get('/api/devices', async (req, res) => {
+  const kasaStatus = await getSafeKasaStatus();
+  res.json(buildManagedDevices(kasaStatus));
+});
+
+app.get('/api/devices/:deviceId', async (req, res) => {
+  const kasaStatus = await getSafeKasaStatus();
+  const device = buildManagedDevices(kasaStatus).find(
+    (entry) => entry.id === req.params.deviceId
+  );
+
+  if (!device) {
+    res.status(404).json({ error: 'Device not found' });
+    return;
+  }
+
+  res.json(device);
+});
+
+app.get('/api/devices/:deviceId/state', async (req, res) => {
+  const kasaStatus = await getSafeKasaStatus();
+  const device = buildManagedDevices(kasaStatus).find(
+    (entry) => entry.id === req.params.deviceId
+  );
+
+  if (!device) {
+    res.status(404).json({ error: 'Device not found' });
+    return;
+  }
+
+  res.json({
+    deviceId: device.id,
+    online: device.online,
+    values: {
+      power: device.metadata?.power ?? device.metadata?.lastState?.on_off,
+      brightness: device.metadata?.lastState?.brightness,
+      hue: device.metadata?.lastState?.hue,
+      saturation: device.metadata?.lastState?.saturation,
+      color_temp: device.metadata?.lastState?.color_temp,
+    },
+    updatedAt: new Date().toISOString(),
+  });
+});
+
+app.get('/api/mappings', (req, res) => {
+  res.json([]);
+});
+
+app.post('/api/devices/:deviceId/actions/:capabilityId', async (req, res) => {
+  try {
+    const result = await executeManagedDeviceAction(
+      req.params.deviceId,
+      req.params.capabilityId,
+      req.body || {}
+    );
+    res.status(result.ok ? 200 : 502).json(result);
+  } catch (err) {
+    res.status(err.status || 502).json({
+      ok: false,
+      deviceId: req.params.deviceId,
+      capabilityId: req.params.capabilityId,
+      error: err.message || 'Action failed',
+      message: err.message || 'Action failed',
+    });
+  }
 });
 
 app.get('/api/kasa/status', async (req, res) => {

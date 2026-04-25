@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import Link from "next/link";
 import { io, Socket } from "socket.io-client";
 import { SystemStatusPanel } from "@/components/dashboard/system-status-panel";
 import { NetworkStatusIndicator } from "@/components/dashboard/network-status-indicator";
@@ -14,7 +15,7 @@ import {
   ActiveBulbConfigDevice,
   ActiveBulbConfigPanel,
 } from "@/components/dashboard/active-bulb-config-panel";
-import { Hand, Activity } from "lucide-react";
+import { Hand, Activity, Settings } from "lucide-react";
 
 // Declare socket outside to prevent constant reconnections on UI renders
 let socket: Socket;
@@ -306,6 +307,13 @@ export default function Dashboard() {
           </div>
           
           <div className="flex items-center gap-4">
+            <Link
+              href="/configuration"
+              className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-medium text-muted-foreground transition hover:border-primary/40 hover:text-foreground"
+            >
+              <Settings className="h-4 w-4" />
+              Configuration
+            </Link>
             <div className="flex items-center gap-2 rounded-lg bg-card px-3 py-2 border border-border">
               <span className="text-xs text-muted-foreground">Broker URL:</span>
               <input
