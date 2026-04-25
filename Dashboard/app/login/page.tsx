@@ -7,40 +7,45 @@ import { Lock, LogIn } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { DEFAULT_BACKEND_URL, fetchBackend } from "@/lib/backend-auth";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [backendUrl, setBackendUrl] = useState(DEFAULT_BACKEND_URL);
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState("Enter the dashboard password.");
   const [submitting, setSubmitting] = useState(false);
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setSubmitting(true);
-    setStatus("Signing in.");
+const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+  event.preventDefault();
 
-    try {
-      const response = await fetchBackend(`${backendUrl}/api/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
-      });
+  if (submitting) return;
 
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => ({}))) as { error?: string };
-        throw new Error(payload.error || `Login failed (${response.status})`);
-      }
+  setSubmitting(true);
+  setStatus("Signing in.");
 
-      router.replace("/");
-      router.refresh();
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Login failed.");
+  try {
+    const response = await fetch('/api/auth/login', {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+      redirect: "manual",
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+
+      setStatus(payload.error || "Invalid username or password.");
+      setPassword("");
       setSubmitting(false);
+      return;
     }
-  };
+
+    router.replace("/");
+  } catch {
+    setStatus("Could not reach the backend. Check the backend URL and try again.");
+    setSubmitting(false);
+  }
+};
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-background px-4 py-8">
@@ -70,6 +75,7 @@ export default function LoginPage() {
             type="password"
             autoComplete="current-password"
             value={password}
+            disabled={submitting}
             onChange={(event) => setPassword(event.target.value)}
           />
         </div>

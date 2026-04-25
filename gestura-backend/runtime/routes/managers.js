@@ -7,19 +7,19 @@ function createManagersRouter({ managerService, deviceRegistry, deviceSyncServic
     res.json(managerService.getInfos());
   });
 
-  router.post('/kasa', async (req, res) => {
-    res.status(410).json({
-      error: 'Kasa managers now run as standalone manager services and attach to node-agent over websocket.',
-      expectedFlow: 'Start kasa-manager with NODE_AGENT_WS_URL and MANAGER_* env vars.',
-    });
-  });
+  // router.post('/kasa', async (req, res) => {
+  //   res.status(410).json({
+  //     error: 'Kasa managers now run as standalone manager services and attach to node-agent over websocket.',
+  //     expectedFlow: 'Start kasa-manager with NODE_AGENT_WS_URL and MANAGER_* env vars.',
+  //   });
+  // });
 
-  router.post('/external', async (req, res) => {
-    res.status(410).json({
-      error: 'HTTP external managers are deprecated. Managers must attach to node-agent over websocket.',
-      expectedFlow: 'Start a manager process with NODE_AGENT_WS_URL and MANAGER_* env vars.',
-    });
-  });
+  // router.post('/external', async (req, res) => {
+  //   res.status(410).json({
+  //     error: 'HTTP external managers are deprecated. Managers must attach to node-agent over websocket.',
+  //     expectedFlow: 'Start a manager process with NODE_AGENT_WS_URL and MANAGER_* env vars.',
+  //   });
+  // });
 
   router.delete('/:managerId', async (req, res) => {
     const removed = await managerService.unregister(req.params.managerId);

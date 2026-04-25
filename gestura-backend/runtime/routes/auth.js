@@ -21,6 +21,17 @@ function createAuthRouter({ authService }) {
       //   authService.setSessionCookie(res, token);
       // }
 
+
+      res.cookie("gestura_session", token, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      path: "/",
+      maxAge: 1000 * 60 * 60 * 12,
+    });
+
+    console.log("[Auth] Login success, Set-Cookie header:", res.getHeader("Set-Cookie"));
+
       return res.json({
         ok: true,
         token,
