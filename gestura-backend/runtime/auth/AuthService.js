@@ -140,10 +140,7 @@ class AuthService {
         return next();
       }
 
-      const picoToken = req.headers['x-pico-token'];
-      const expectedPicoToken = process.env.PICO_SHARED_TOKEN;
-
-      if (expectedPicoToken && picoToken === expectedPicoToken) {
+      if (this.hasValidPicoTokenRequest(req)) {
         req.session = { sub: 'pico', kind: 'device' };
         return next();
       }
@@ -172,6 +169,24 @@ class AuthService {
     } catch {
       return next(new Error('Unauthorized'));
     }
+  }
+
+  hasValidPicoTokenRequest(req, searchParams = null) {
+    const expectedPicoToken =
+      process.env.PICO_API_TOKEN ||
+      process.env.PICO_SHARED_TOKEN ||
+      process.env.GLOVE_API_TOKEN;
+    if (!expectedPicoToken) return false;
+
+    const providedToken =
+      req.headers['x-pico-token'] ||
+      extractBearerFromHandshake(req.headers?.authorization) ||
+      req.query?.api_key ||
+      req.query?.token ||
+      searchParams?.get?.('api_key') ||
+      searchParams?.get?.('token');
+
+    return typeof providedToken === 'string' && timingSafeEqualString(providedToken, expectedPicoToken);
   }
 
   signValue(value) {

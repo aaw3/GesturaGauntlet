@@ -109,7 +109,7 @@ export default function Dashboard() {
         latest: { ...normalized, timestamp: data.timestamp },
         sampleCount: current.sampleCount + 1,
         lastUpdatedAt: data.timestamp ?? new Date().toISOString(),
-        source: current.source ?? "mqtt",
+        source: current.source ?? "websocket",
       }));
     });
 
@@ -143,7 +143,7 @@ export default function Dashboard() {
   const refreshStatus = async () => {
     const startedAt = performance.now();
     try {
-      const response = await fetch('/api/status');
+      const response = await fetch("/api/status");
       if (!response.ok) throw new Error(`Status ${response.status}`);
       const data = await response.json();
       setStatusLatencyMs(Math.round(performance.now() - startedAt));
@@ -270,8 +270,8 @@ export default function Dashboard() {
 
             <div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <MetricTile label="Device managers" value={managerCount.toLocaleString()} icon={BarChart3} />
-              <MetricTile label="Mode topic" value="gauntlet/mode" icon={Network} />
-              <MetricTile label="Sensor topic" value="gauntlet/sensors" icon={Cpu} />
+              <MetricTile label="Realtime transport" value="websocket" icon={Network} />
+              <MetricTile label="Sensor stream" value="live" icon={Cpu} />
               <MetricTile label="Last sync" value={lastStatusSync ?? "Pending"} icon={RefreshCw} />
             </div>
           </div>
@@ -289,11 +289,11 @@ export default function Dashboard() {
 
             <div className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="broker-url">Server URL</Label>
+                <Label htmlFor="broker-url">Backend URL</Label>
               </div>
 
               <InfoRow label="WebSocket" value={networkStatus} />
-              <InfoRow label="MQTT broker" value="tcp://localhost:1883" />
+              <InfoRow label="Glove transport" value="/glove websocket" />
               <InfoRow label="HTTP status" value={statusLatencyMs === null ? "unavailable" : "reachable"} />
               <InfoRow label="Input source" value={sensorStatus.source ?? "waiting"} />
             </div>

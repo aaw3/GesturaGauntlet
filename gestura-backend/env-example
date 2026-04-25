@@ -3,13 +3,6 @@
 
 PORT=3001
 
-# Port for the embedded MQTT broker (Pico connects here)
-MQTT_BROKER_PORT=1883
-
-# MQTT topics used by the glove firmware.
-MQTT_TOPIC_SENSORS=gauntlet/sensors
-MQTT_TOPIC_MODE=gauntlet/mode
-
 # Dashboard sensor sample history retained by the backend.
 SENSOR_HISTORY_SIZE=200
 
@@ -26,6 +19,9 @@ DASHBOARD_PASSWORD_HASH=
 # Service-to-service auth.
 NODE_SHARED_TOKEN=replace-with-node-shared-secret
 PICO_API_TOKEN=replace-with-pico-bearer-token
+# Plain websocket endpoint for Pico:
+# ws://localhost:3001/glove?gloveId=primary_glove&api_key=<PICO_API_TOKEN>
+# Use wss:// when the control plane is behind TLS.
 
 # Optional per-node token map instead of NODE_SHARED_TOKEN.
 # NODE_TOKEN_MAP={"pi-edge-1":"secret-1","pi-edge-2":"secret-2"}

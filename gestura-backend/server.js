@@ -2,10 +2,9 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const net = require('net');
-const aedes = require('aedes')();
+const cookieParser = require("cookie-parser");
 
-const { parseJsonPayload } = require('./runtime/utils');
+
 const { SensorStore } = require('./runtime/sensorStore');
 const { DeviceRegistry } = require('./runtime/services/DeviceRegistry');
 const { ManagerService } = require('./runtime/services/ManagerService');
@@ -30,6 +29,7 @@ const { createRouteMetricsRouter } = require('./runtime/routes/routeMetrics');
 const { createGlovesRouter } = require('./runtime/routes/gloves');
 const { createTelemetryRouter } = require('./runtime/routes/telemetry');
 const { createSystemRouter } = require('./runtime/routes/system');
+const { createGloveSocketHub } = require('./runtime/ws/gloveSocket');
 const { registerNodeAgentSocket } = require('./runtime/ws/nodeAgentSocket');
 
 try {
@@ -57,6 +57,9 @@ app.use(cors({
   credentials: true,
 }));
 
+// Parse cookies nicely for auth
+app.use(cookieParser());
+
 app.use(express.json());
 
 app.use((err, req, res, next) => {
@@ -75,9 +78,6 @@ const io = new Server(server, {
   cors: { origin: true, methods: ['GET', 'POST'], credentials: true },
 });
 
-const MQTT_TOPIC_SENSORS = process.env.MQTT_TOPIC_SENSORS || 'gauntlet/sensors';
-const MQTT_TOPIC_MODE = process.env.MQTT_TOPIC_MODE || 'gauntlet/mode';
-const MQTT_BROKER_PORT = Number(process.env.MQTT_BROKER_PORT || 1883);
 const SENSOR_HISTORY_SIZE = Number(process.env.SENSOR_HISTORY_SIZE || 200);
 
 const sensorStore = new SensorStore({ historySize: SENSOR_HISTORY_SIZE });
@@ -100,27 +100,9 @@ const gloveConfigService = new GloveConfigService({
   telemetryService,
 });
 const authService = new AuthService();
-const brokerServer = net.createServer(aedes.handle);
+let gloveSocketHub = null;
 
 let currentMode = 'passive';
-let isInternalPublish = false;
-
-function publishMode(mode) {
-  const payload = String(mode).toUpperCase();
-
-  isInternalPublish = true;
-  aedes.publish(
-    {
-      topic: MQTT_TOPIC_MODE,
-      payload: Buffer.from(payload),
-      qos: 0,
-      retain: true,
-    },
-    () => {
-      isInternalPublish = false;
-    }
-  );
-}
 
 function setMode(mode, source = 'api') {
   const normalizedMode = String(mode || '').trim().toLowerCase();
@@ -130,8 +112,8 @@ function setMode(mode, source = 'api') {
 
   currentMode = normalizedMode;
   console.log(`[Mode] ${source} set mode to ${currentMode}`);
-  publishMode(currentMode);
   io.emit('modeUpdate', currentMode);
+  gloveSocketHub?.broadcastModeUpdate(currentMode);
   return currentMode;
 }
 
@@ -148,12 +130,9 @@ function publicStatus() {
     mode: currentMode,
     system,
     sensor: sensorStore.getState(),
-    mqtt: {
-      brokerUrl: `tcp://localhost:${MQTT_BROKER_PORT}`,
-      topics: {
-        mode: MQTT_TOPIC_MODE,
-        sensors: MQTT_TOPIC_SENSORS,
-      },
+    realtime: {
+      dashboardSocketPath: '/',
+      gloveSocketPath: '/glove',
     },
     managers: managerService.getInfos(),
     nodes: nodeRegistry.getAll(),
@@ -185,6 +164,7 @@ function systemStatus() {
       online: true,
       connectedNodeCount: io.of('/nodes').sockets.size,
       connectedDashboardCount: io.of('/').sockets.size,
+      connectedGloveCount: gloveSocketHub?.getClientCount?.() || 0,
     },
     inventory: {
       nodeCount: nodeRegistry.getAll().length,
@@ -198,50 +178,6 @@ function systemStatus() {
   };
 }
 
-brokerServer.on('error', (err) => {
-  console.error(`[MQTT] Broker failed on port ${MQTT_BROKER_PORT}: ${err.message}`);
-  process.exitCode = 1;
-});
-
-brokerServer.listen(MQTT_BROKER_PORT, () => {
-  console.log(`[MQTT] Broker listening on tcp://0.0.0.0:${MQTT_BROKER_PORT}`);
-});
-
-aedes.on('clientReady', (client) => {
-  console.log(`[MQTT] Client connected    : ${client?.id ?? 'unknown'}`);
-});
-
-aedes.on('clientDisconnect', (client) => {
-  console.log(`[MQTT] Client disconnected : ${client?.id ?? 'unknown'}`);
-});
-
-aedes.on('publish', (packet, client) => {
-  if (packet.topic?.startsWith('$SYS')) return;
-
-  if (packet.topic === MQTT_TOPIC_SENSORS) {
-    try {
-      const data = parseJsonPayload(packet.payload);
-      void handleSensorUpdate(data, `mqtt:${client?.id ?? 'broker'}`).catch((err) => {
-        console.error('[MQTT] Sensor handling error:', err.message);
-      });
-    } catch (err) {
-      console.error('[MQTT] Sensor parse error:', err.message);
-    }
-    return;
-  }
-
-  if (packet.topic === MQTT_TOPIC_MODE) {
-    if (isInternalPublish) return;
-
-    const newMode = packet.payload.toString().trim().toLowerCase();
-    if (newMode === 'active' || newMode === 'passive') {
-      currentMode = newMode;
-      console.log('[MQTT] Hardware mode changed to:', currentMode);
-      io.emit('modeUpdate', currentMode);
-    }
-  }
-});
-
 io.of('/').use((socket, next) => authService.authenticateDashboardSocket(socket, next));
 
 io.of('/').on('connection', (socket) => {
@@ -252,7 +188,6 @@ io.of('/').on('connection', (socket) => {
   socket.emit('managers', managerService.getInfos());
   socket.emit('nodes', nodeRegistry.getAll());
   socket.emit('devices', deviceRegistry.getAll());
-  publishMode(currentMode);
 
   socket.on('getMode', () => {
     socket.emit('modeUpdate', currentMode);
@@ -328,8 +263,17 @@ app.use('/api/nodes', authService.requireDashboardAuth(), createNodesRouter(serv
 app.use('/api/route-metrics', authService.requireDashboardAuth(), createRouteMetricsRouter(services));
 app.use('/api/telemetry', authService.requireDashboardAuth(), createTelemetryRouter(services));
 app.use('/api/system', authService.requireDashboardAuth(), createSystemRouter(services));
-app.use('/api/gloves', authService.requireDashboardAuth(), createGlovesRouter(services));
+app.use('/api/gloves', authService.requireDashboardOrPicoToken(), createGlovesRouter(services));
 registerNodeAgentSocket(io, services);
+gloveSocketHub = createGloveSocketHub({
+  server,
+  authService,
+  gloveConfigService,
+  telemetryService,
+  onSensorUpdate: handleSensorUpdate,
+  getMode: () => currentMode,
+  setMode,
+});
 
 const PORT = Number(process.env.PORT || 3001);
 server.on('error', (err) => {
@@ -391,8 +335,7 @@ async function start() {
 
   server.listen(PORT, () => {
     console.log(`[Server] Gestura backend on http://localhost:${PORT}`);
-    console.log(`[Server] MQTT sensor topic: ${MQTT_TOPIC_SENSORS}`);
-    console.log(`[Server] MQTT mode topic  : ${MQTT_TOPIC_MODE}`);
+    console.log(`[Server] Glove websocket endpoint: ws://localhost:${PORT}/glove`);
   });
 }
 
