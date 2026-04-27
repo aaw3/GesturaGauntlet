@@ -181,6 +181,26 @@ class PostgresStore {
     await this.pool.query('DELETE FROM device_managers WHERE id = $1', [managerId]);
   }
 
+  async getAppConfiguration(key) {
+    if (!this.pool) return null;
+    const result = await this.pool.query('SELECT payload FROM app_configurations WHERE key = $1', [key]);
+    return result.rows[0]?.payload || null;
+  }
+
+  async setAppConfiguration(key, payload) {
+    if (!this.pool) return payload;
+    await this.pool.query(
+      `
+        INSERT INTO app_configurations (key, payload)
+        VALUES ($1, $2::jsonb)
+        ON CONFLICT (key)
+        DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()
+      `,
+      [key, JSON.stringify(payload)],
+    );
+    return payload;
+  }
+
   async saveDevicesForManager(managerId, devices = []) {
     if (!this.pool) return;
 

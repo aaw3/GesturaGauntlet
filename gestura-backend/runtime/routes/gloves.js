@@ -11,6 +11,22 @@ function createGlovesRouter({ gloveConfigService }) {
     res.json(gloveConfigService.getEndpointMetadata());
   });
 
+  router.get('/:gloveId/wifi-networks', (req, res) => {
+    res.json(gloveConfigService.listWifiNetworks(req.params.gloveId));
+  });
+
+  router.post('/:gloveId/wifi-networks', (req, res) => {
+    try {
+      res.json(gloveConfigService.upsertWifiNetwork(req.params.gloveId, req.body));
+    } catch (err) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  router.delete('/:gloveId/wifi-networks/:id', (req, res) => {
+    res.json({ ok: gloveConfigService.removeWifiNetwork(req.params.gloveId, req.params.id) });
+  });
+
   router.post('/:gloveId/route-state', (req, res) => {
     if (!req.body?.managerId) {
       res.status(400).json({ error: 'managerId is required' });

@@ -335,6 +335,7 @@ async function start() {
       await deviceRegistry.upsertMany(await persistence.listManagedDevices());
       await mappingService.loadPersisted();
       await sceneService.loadPersisted();
+      await gloveConfigService.loadPersisted();
       console.log('[Persistence] Postgres persistence enabled.');
     } else {
       console.log('[Persistence] DATABASE_URL not set; using in-memory managers and configuration.');

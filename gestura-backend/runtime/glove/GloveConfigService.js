@@ -13,6 +13,7 @@ class GloveConfigService {
     this.telemetryService = telemetryService;
     this.routeStates = new Map();
     this.passiveMetrics = [];
+    this.wifiNetworks = new Map();
   }
 
   getConfigSnapshot(gloveId) {
@@ -28,6 +29,7 @@ class GloveConfigService {
       })),
       managers,
       endpoints: this.getEndpointMetadata(),
+      wifiNetworks: this.listWifiNetworks(gloveId),
       routeStates: this.getRouteStates(),
       policy: {
         activeCommandBacklog: false,
@@ -35,6 +37,13 @@ class GloveConfigService {
         lanCooldownMs: 15_000,
       },
     };
+  }
+
+  async loadPersisted() {
+    const payload = await this.persistence?.getAppConfiguration?.('glove_wifi_networks');
+    for (const network of payload?.networks || []) {
+      if (network?.id && network?.ssid) this.wifiNetworks.set(network.id, { ...network });
+    }
   }
 
   getRouteStates() {
@@ -85,6 +94,45 @@ class GloveConfigService {
       },
     ]);
     return { ok: true, accepted, clearClientBuffer: true };
+  }
+
+  listWifiNetworks(gloveId) {
+    return Array.from(this.wifiNetworks.values())
+      .filter((network) => !gloveId || network.gloveId === gloveId)
+      .map((network) => ({ ...network }));
+  }
+
+  upsertWifiNetwork(gloveId, input = {}) {
+    const ssid = String(input.ssid || '').trim();
+    if (!ssid) throw new Error('ssid is required');
+    const network = {
+      id: input.id || `${gloveId}:${ssid}`,
+      gloveId,
+      ssid,
+      password: String(input.password || ''),
+      updatedAt: new Date().toISOString(),
+    };
+    this.wifiNetworks.set(network.id, network);
+    void this.persistWifiNetworks();
+    return { ...network };
+  }
+
+  removeWifiNetwork(gloveId, idOrSsid) {
+    const target = String(idOrSsid || '');
+    for (const [id, network] of this.wifiNetworks.entries()) {
+      if (network.gloveId === gloveId && (id === target || network.ssid === target)) {
+        this.wifiNetworks.delete(id);
+        void this.persistWifiNetworks();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async persistWifiNetworks() {
+    await this.persistence?.setAppConfiguration?.('glove_wifi_networks', {
+      networks: Array.from(this.wifiNetworks.values()),
+    });
   }
 }
 

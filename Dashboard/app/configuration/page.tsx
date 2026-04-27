@@ -26,6 +26,7 @@ import {
   DeviceDefinition,
   DeviceManagerInfo,
   GloveMappingContract,
+  GloveWifiNetwork,
   mapBackendDeviceToDefinition,
   mapGloveMappingContractToActionMapping,
   MappingMode,
@@ -64,7 +65,11 @@ export default function ConfigurationPage() {
   const [managers, setManagers] = useState<DeviceManagerInfo[]>([]);
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
-  const [inventoryTab, setInventoryTab] = useState<"nodes" | "managers" | "devices" | "mappings">("nodes");
+  const [inventoryTab, setInventoryTab] = useState<"nodes" | "managers" | "devices" | "mappings" | "wifi">("nodes");
+  const [wifiNetworks, setWifiNetworks] = useState<GloveWifiNetwork[]>([]);
+  const [wifiSsid, setWifiSsid] = useState("");
+  const [wifiPassword, setWifiPassword] = useState("");
+  const [wifiStatus, setWifiStatus] = useState("");
   const [testCapabilityId, setTestCapabilityId] = useState<string>("");
   const [testValue, setTestValue] = useState<string>("");
   const [testStatus, setTestStatus] = useState("Select a device function to test.");
@@ -285,9 +290,41 @@ export default function ConfigurationPage() {
       const mappingList = mappingResponse.ok ? ((await mappingResponse.json()) as GloveMappingContract[]) : [];
       setCentralMappings(mappingList);
       setMappings(mappingList.map(mapGloveMappingContractToActionMapping));
+
+      const wifiResponse = await fetch('/api/gloves/primary_glove/wifi-networks');
+      if (wifiResponse.ok) setWifiNetworks((await wifiResponse.json()) as GloveWifiNetwork[]);
     } catch (error) {
       console.error(error instanceof Error ? error.message : "Failed to load managers.");
     }
+  };
+
+  const saveWifiNetwork = async () => {
+    if (!wifiSsid.trim()) {
+      setWifiStatus("SSID is required.");
+      return;
+    }
+    const response = await fetch('/api/gloves/primary_glove/wifi-networks', {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ssid: wifiSsid.trim(), password: wifiPassword }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      setWifiStatus(payload.error || "Failed to save WiFi network.");
+      return;
+    }
+    setWifiSsid("");
+    setWifiPassword("");
+    setWifiStatus("WiFi network saved. The glove will sync it on next config refresh.");
+    void refreshManagersAndDevices();
+  };
+
+  const deleteWifiNetwork = async (network: GloveWifiNetwork) => {
+    await fetch(`/api/gloves/primary_glove/wifi-networks/${encodeURIComponent(network.id || network.ssid)}`, {
+      method: "DELETE",
+    });
+    setWifiStatus("WiFi network removed.");
+    void refreshManagersAndDevices();
   };
 
   const runTestFunction = async () => {
@@ -428,8 +465,8 @@ export default function ConfigurationPage() {
                 Nodes are real node-agent websocket registrations; central is not shown as a node.
               </p>
             </div>
-            <div className="grid grid-cols-4 gap-1 rounded-md border border-border bg-background p-1">
-              {(["nodes", "managers", "devices", "mappings"] as const).map((tab) => (
+            <div className="grid grid-cols-5 gap-1 rounded-md border border-border bg-background p-1">
+              {(["nodes", "managers", "devices", "mappings", "wifi"] as const).map((tab) => (
                 <Button
                   key={tab}
                   size="sm"
@@ -587,6 +624,40 @@ export default function ConfigurationPage() {
                 </div>
               ))}
               {centralMappings.length === 0 && <EmptyInventory label="No central mappings saved." />}
+            </div>
+          )}
+
+          {inventoryTab === "wifi" && (
+            <div className="grid gap-4">
+              <div className="grid gap-3 rounded-md border border-border bg-background p-4 md:grid-cols-[1fr_1fr_auto] md:items-end">
+                <Field label="SSID">
+                  <Input value={wifiSsid} onChange={(event) => setWifiSsid(event.target.value)} />
+                </Field>
+                <Field label="Password">
+                  <Input
+                    type="password"
+                    value={wifiPassword}
+                    onChange={(event) => setWifiPassword(event.target.value)}
+                  />
+                </Field>
+                <Button onClick={() => void saveWifiNetwork()}>
+                  <Check className="size-4" />
+                  Save network
+                </Button>
+              </div>
+              {wifiStatus && <p className="text-sm text-muted-foreground">{wifiStatus}</p>}
+              <div className="grid gap-2">
+                {wifiNetworks.map((network) => (
+                  <div key={network.id || network.ssid} className="grid gap-2 rounded-md border border-border bg-background p-3 md:grid-cols-[1fr_160px_auto] md:items-center">
+                    <InfoRow label="SSID" value={network.ssid} />
+                    <InfoRow label="Updated" value={formatTimestamp(network.updatedAt)} />
+                    <Button size="sm" variant="outline" onClick={() => void deleteWifiNetwork(network)}>
+                      Remove
+                    </Button>
+                  </div>
+                ))}
+                {wifiNetworks.length === 0 && <EmptyInventory label="No WiFi networks configured." />}
+              </div>
             </div>
           )}
         </section>

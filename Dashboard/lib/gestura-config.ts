@@ -177,6 +177,14 @@ export interface GloveMappingContract {
   };
 }
 
+export interface GloveWifiNetwork {
+  id: string;
+  gloveId: string;
+  ssid: string;
+  password?: string;
+  updatedAt?: string;
+}
+
 export const sourceInputs = [
   "top_double_tap",
   "bottom_double_tap",
