@@ -7,6 +7,14 @@ try {
 }
 const { createKasaManager } = require('./KasaManager');
 
+const DEBUG = process.argv.includes("--debug");
+
+function debugLog(...args) {
+  if (DEBUG) {
+    console.log(...args);
+  }
+}
+
 async function main() {
   const nodeAgentUrl =
     process.env.NODE_AGENT_WS_URL ||
@@ -24,34 +32,46 @@ async function main() {
     interfaces: managerInterfacesFromEnv(),
   });
 
-  const socket = io(nodeAgentUrl, { transports: ['websocket', 'polling'] });
+const socket = io(nodeAgentUrl, {
+  transports: ['websocket', 'polling'],
+  autoUnref: false,
+  reconnection: true,
+});
 
-  socket.on('connect', async () => {
-    try {
-      const devices = await manager.listDevices();
-      socket.emit('manager:attach', {
-        token: process.env.MANAGER_TOKEN,
-        info: manager.getInfo(),
-        devices,
-      });
-    } catch (err) {
-      console.error('[KasaManager] attach failed:', err.message);
-      socket.emit('manager:attach', {
-        token: process.env.MANAGER_TOKEN,
-        info: manager.getInfo(),
-        devices: [],
-        error: err.message,
-      });
+socket.on('connect', async () => {
+  console.log(`[KasaManager] connected to node agent as socket ${socket.id}`);
+
+  try {
+    const devices = await manager.listDevices();
+    socket.emit('manager:attach', {
+      token: process.env.MANAGER_TOKEN,
+      info: manager.getInfo(),
+      devices,
+    },
+    (ack) => {
+      debugLog("[SimManager] manager:attach ack:", ack);
     }
-  });
+  );
+  } catch (err) {
+    console.error('[KasaManager] attach failed:', err.message);
+  }
+});
 
-  setInterval(() => {
-    socket.emit('manager:heartbeat', {
-      managerId: manager.getInfo().id,
-      health: 'ok',
-      ts: Date.now(),
-    });
-  }, Number(process.env.MANAGER_HEARTBEAT_MS || 10_000)).unref?.();
+socket.on('connect_error', (err) => {
+  console.error('[KasaManager] node agent connection error:', err.message);
+});
+
+socket.on('disconnect', (reason) => {
+  console.warn('[KasaManager] disconnected from node agent:', reason);
+});
+
+setInterval(() => {
+  socket.emit('manager:heartbeat', {
+    managerId: manager.getInfo().id,
+    health: 'ok',
+    ts: Date.now(),
+  });
+}, Number(process.env.MANAGER_HEARTBEAT_MS || 10_000));
 
   socket.on('manager:listDevices', async (_payload, ack) => {
     try {

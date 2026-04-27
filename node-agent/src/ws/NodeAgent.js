@@ -4,6 +4,11 @@ const { LocalNodeCache } = require('../cache/LocalNodeCache');
 const { TelemetryBuffer } = require('../telemetry/TelemetryBuffer');
 const { ManagerAttachmentServer } = require('./ManagerAttachmentServer');
 
+const DEBUG = process.argv.includes('--debug') || process.env.DEBUG === '1';
+const debug = (...args) => {
+  if (DEBUG) console.log('[NodeAgent][debug]', ...args);
+};
+
 class NodeAgent {
   constructor({
     centralApiUrl,
@@ -46,7 +51,21 @@ class NodeAgent {
       auth: { token: this.node.token, nodeId: this.node.id },
     });
 
-    this.socket.on('connect', () => void this.register());
+    this.socket.on('connect', () => {
+      debug('connected to central', {
+        url: `${this.centralWsUrl}/nodes`,
+        socketId: this.socket.id,
+      });
+      void this.register();
+    });
+
+    this.socket.on('connect_error', (err) => {
+      console.error('[NodeAgent] central connect error:', err.message);
+    });
+
+    this.socket.on('disconnect', (reason) => {
+      console.warn('[NodeAgent] central disconnected:', reason);
+    });
     this.socket.on('manager:listDevices', (payload, ack) => this.handleManagerCall(payload, ack, 'listDevices'));
     this.socket.on('manager:getDeviceState', (payload, ack) =>
       this.handleManagerCall(payload, ack, 'getDeviceState', payload.deviceId)
@@ -72,7 +91,13 @@ class NodeAgent {
 
   async register() {
     const managerIds = Array.from(this.managers.keys());
+    debug('registering node', {
+      nodeId: this.node.id,
+      managerIds,
+    });
+    
     this.socket.emit('node:register', { ...this.node, managerIds }, async (response) => {
+      debug('node:register response', response);
       if (response?.config) this.cache.setConfigSnapshot(response.config);
       this.telemetry.record({
         eventType: 'node_registered',

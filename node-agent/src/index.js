@@ -1,4 +1,11 @@
 const { NodeAgent } = require('./ws/NodeAgent');
+require('dotenv').config();
+
+const DEBUG = process.argv.includes('--debug') || process.env.DEBUG === '1';
+
+function debug(...args) {
+  if (DEBUG) console.log('[NodeAgent][debug]', ...args);
+}
 
 async function main() {
   const centralApiUrl = process.env.CENTRAL_API_URL || process.env.CENTRAL_URL || 'http://localhost:3001';
@@ -14,6 +21,15 @@ async function main() {
   if (!managerToken && !managerTokenMap) {
     throw new Error('MANAGER_SHARED_TOKEN, MANAGER_TOKEN, or MANAGER_TOKEN_MAP is required');
   }
+
+  debug('startup config', {
+    nodeId,
+    centralWsUrl,
+    managerAttachPort: Number(process.env.NODE_AGENT_PORT || 3201),
+    hasNodeToken: Boolean(nodeToken),
+    hasManagerToken: Boolean(managerToken),
+    hasManagerTokenMap: Boolean(managerTokenMap),
+  });
 
   const agent = new NodeAgent({
     centralApiUrl,

@@ -449,7 +449,7 @@ export default function ConfigurationPage() {
                 <button
                   key={device.id}
                   onClick={() => setSelectedDeviceId(device.id)}
-                  className={`relative flex w-full items-center gap-3 overflow-hidden rounded-md border p-3 pl-4 text-left transition ${
+                  className={`relative flex w-full items-center gap-3 overflow-hidden rounded-md border p-3 pt-5 pl-4 text-left transition ${
                     selectedDeviceId === device.id
                       ? "border-primary bg-primary/10"
                       : "border-border bg-background hover:border-primary/50"
