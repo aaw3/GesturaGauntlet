@@ -1,3 +1,5 @@
+const { normalizeSensorPayload } = require('../utils');
+
 function registerNodeAgentSocket(io, services) {
   const namespace = io.of('/nodes');
 
@@ -43,7 +45,7 @@ function registerNodeAgentSocket(io, services) {
         online: true,
         lastHeartbeatAt: new Date().toISOString(),
         managerIds: payload.managerIds || [],
-        interfaces: payload.interfaces || [],
+        interfaces: normalizeInterfaces(payload.interfaces || []),
         metadata: payload.metadata || {},
       });
       ack?.({ ok: true, node, config: services.gloveConfigService.getConfigSnapshot('default') });
@@ -148,6 +150,16 @@ function registerNodeAgentSocket(io, services) {
       ack?.(result);
     });
 
+    socket.on('glove:sensorSnapshot', (payload = {}, ack) => {
+      io.emit('sensorData', {
+        ...normalizeSensorPayload(payload),
+        pressure: Number(payload.pressure ?? 0),
+        timestamp: new Date().toISOString(),
+        source: `edge-node:${payload.nodeId || currentNodeId || 'unknown'}`,
+      });
+      ack?.({ ok: true });
+    });
+
     socket.on('disconnect', () => {
       if (currentNodeId) {
         services.nodeRegistry.markOffline(currentNodeId);
@@ -155,6 +167,42 @@ function registerNodeAgentSocket(io, services) {
       }
     });
   });
+}
+
+function normalizeInterfaces(interfaces = []) {
+  const normalized = [];
+  for (const item of interfaces) {
+    if (!['lan', 'public'].includes(item.kind)) continue;
+    for (const url of parseUrlList(item.urls || item.url)) {
+      normalized.push({
+        kind: item.kind,
+        url,
+        priority: Number(item.priority ?? (item.kind === 'lan' ? 10 : 50)),
+      });
+    }
+  }
+  return orderInterfaces(normalized);
+}
+
+function orderInterfaces(interfaces) {
+  const lan = interfaces
+    .filter((item) => item.kind === 'lan')
+    .sort((left, right) => left.priority - right.priority)
+    .map((item, index) => ({ ...item, priority: index + 10 }));
+  const publicStart = lan.length ? lan[lan.length - 1].priority + 10 : 50;
+  const pub = interfaces
+    .filter((item) => item.kind === 'public')
+    .sort((left, right) => left.priority - right.priority)
+    .map((item, index) => ({ ...item, priority: publicStart + index }));
+  return [...lan, ...pub];
+}
+
+function parseUrlList(value) {
+  if (Array.isArray(value)) return value.map((url) => String(url).trim()).filter(Boolean);
+  return String(value || '')
+    .split(',')
+    .map((url) => url.trim())
+    .filter(Boolean);
 }
 
 function enrichDevices(devices, managerInfo, nodeId) {

@@ -11,6 +11,11 @@ class StateStore:
             "gyro_x": 0.0,
             "gyro_y": 0.0,
             "gyro_z": 0.0,
+            "roll": 0.0,
+            "pitch": 0.0,
+            "roll_deg": 0.0,
+            "pitch_deg": 0.0,
+            "input_events": [],
         }
 
     def update(self, **kwargs):
@@ -20,6 +25,18 @@ class StateStore:
 
     def get(self, key, default=None):
         return self._state.get(key, default)
+
+    def enqueue_input(self, source, value=1, **metadata):
+        events = self._state.get("input_events") or []
+        event = {"source": source, "value": value}
+        event.update(metadata)
+        events.append(event)
+        self._state["input_events"] = events[-10:]
+
+    def drain_inputs(self):
+        events = self._state.get("input_events") or []
+        self._state["input_events"] = []
+        return list(events)
 
     def snapshot(self):
         return dict(self._state)

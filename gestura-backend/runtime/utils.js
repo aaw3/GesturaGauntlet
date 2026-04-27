@@ -19,12 +19,17 @@ function clamp(value, min, max) {
 
 function normalizeSensorPayload(data = {}) {
   return {
+    roll: toFiniteNumber(data.roll),
+    pitch: toFiniteNumber(data.pitch),
+    roll_deg: toFiniteNumber(data.roll_deg),
+    pitch_deg: toFiniteNumber(data.pitch_deg),
     x: toFiniteNumber(data.x ?? data.ax ?? data.accel_x),
     y: toFiniteNumber(data.y ?? data.ay ?? data.accel_y),
     z: toFiniteNumber(data.z ?? data.az ?? data.accel_z),
     gx: toFiniteNumber(data.gx ?? data.gyro_x),
     gy: toFiniteNumber(data.gy ?? data.gyro_y),
     gz: toFiniteNumber(data.gz ?? data.gyro_z),
+    pressure: toFiniteNumber(data.pressure),
   };
 }
 

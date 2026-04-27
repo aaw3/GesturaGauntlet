@@ -6,6 +6,7 @@ function createGloveSocketHub({
   authService,
   gloveConfigService,
   telemetryService,
+  actionRouter,
   onSensorUpdate,
   getMode,
   setMode,
@@ -63,8 +64,22 @@ function createGloveSocketHub({
           return;
         }
 
-        if (payload.type === 'sensor_update') {
+        if (payload.type === 'sensor_snapshot') {
           await onSensorUpdate(payload, `glove-ws:${ws.gloveId}`);
+          return;
+        }
+
+        if (payload.type === 'mapped_action') {
+          const action = payload.action || payload;
+          const result = await actionRouter.execute(action);
+          send(ws, {
+            type: 'mapped_action_ack',
+            gloveId: ws.gloveId,
+            ts: Date.now(),
+            mappingId: action.mappingId,
+            ok: Boolean(result?.ok),
+            result,
+          });
           return;
         }
 
@@ -122,6 +137,17 @@ function createGloveSocketHub({
 
     getClientCount() {
       return clients.size;
+    },
+
+    requestSensorSnapshot(gloveId) {
+      let requested = 0;
+      for (const ws of clients) {
+        if (!gloveId || ws.gloveId === gloveId) {
+          send(ws, { type: 'request_sensor_snapshot', gloveId: ws.gloveId, ts: Date.now() });
+          requested++;
+        }
+      }
+      return requested;
     },
   };
 }

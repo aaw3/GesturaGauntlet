@@ -7,6 +7,10 @@ function createGlovesRouter({ gloveConfigService }) {
     res.json(gloveConfigService.getConfigSnapshot(req.params.gloveId));
   });
 
+  router.get('/:gloveId/endpoints', (_req, res) => {
+    res.json(gloveConfigService.getEndpointMetadata());
+  });
+
   router.post('/:gloveId/route-state', (req, res) => {
     if (!req.body?.managerId) {
       res.status(400).json({ error: 'managerId is required' });

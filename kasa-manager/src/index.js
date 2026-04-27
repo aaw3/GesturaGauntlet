@@ -212,13 +212,19 @@ async function main() {
 
 function managerInterfacesFromEnv() {
   const interfaces = [];
-  if (process.env.MANAGER_LAN_URL) {
-    interfaces.push({ kind: 'lan', url: process.env.MANAGER_LAN_URL, priority: 10 });
-  }
-  if (process.env.MANAGER_PUBLIC_URL) {
-    interfaces.push({ kind: 'public', url: process.env.MANAGER_PUBLIC_URL, priority: 20 });
-  }
+  const lanUrls = parseUrlList(process.env.MANAGER_LAN_URLS || process.env.MANAGER_LAN_URL);
+  const publicUrls = parseUrlList(process.env.MANAGER_PUBLIC_URLS || process.env.MANAGER_PUBLIC_URL);
+  lanUrls.forEach((url, index) => interfaces.push({ kind: 'lan', url, priority: 10 + index }));
+  const publicStart = interfaces.length ? interfaces[interfaces.length - 1].priority + 10 : 50;
+  publicUrls.forEach((url, index) => interfaces.push({ kind: 'public', url, priority: publicStart + index }));
   return interfaces;
+}
+
+function parseUrlList(value) {
+  return String(value || '')
+    .split(',')
+    .map((url) => url.trim())
+    .filter(Boolean);
 }
 
 if (require.main === module) {

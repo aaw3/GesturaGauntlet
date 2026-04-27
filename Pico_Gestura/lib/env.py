@@ -59,3 +59,17 @@ def parse_ws_url(url):
         "path": path or "/glove",
         "secure": secure,
     }
+
+def ws_to_http_url(url):
+    if url.startswith("wss://"):
+        return "https://" + url[len("wss://"):]
+    if url.startswith("ws://"):
+        return "http://" + url[len("ws://"):]
+    return url
+
+def http_to_ws_url(url):
+    if url.startswith("https://"):
+        return "wss://" + url[len("https://"):]
+    if url.startswith("http://"):
+        return "ws://" + url[len("http://"):]
+    return url

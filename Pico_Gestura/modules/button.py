@@ -70,8 +70,15 @@ class GauntletButton:
                             if self.pin_num == 13:
                                 print(">>> ACTION BUTTON SHORT PRESS <<<")
                                 gui.update_state(action="ACTION SENT")
+                                if store.get("mode") == "ACTIVE":
+                                    store.enqueue_input(
+                                        "bottom_tap",
+                                        1,
+                                        button=self.name.lower().replace(" ", "_"),
+                                        duration_ms=duration,
+                                    )
                                 transport_client = store.get("transport")
-                                if transport_client:
+                                if transport_client and store.get("mode") != "ACTIVE":
                                     try:
                                         transport_client.send_json({
                                             "type": "button_action",

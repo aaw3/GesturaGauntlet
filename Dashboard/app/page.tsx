@@ -35,15 +35,32 @@ interface SensorStatus {
 }
 
 interface SensorData {
+  roll: number;
+  pitch: number;
+  roll_deg: number;
+  pitch_deg: number;
   x: number;
   y: number;
   z: number;
   gx: number;
   gy: number;
   gz: number;
+  pressure: number;
 }
 
-const emptySensorData: SensorData = { x: 0, y: 0, z: 0, gx: 0, gy: 0, gz: 0 };
+const emptySensorData: SensorData = {
+  roll: 0,
+  pitch: 0,
+  roll_deg: 0,
+  pitch_deg: 0,
+  x: 0,
+  y: 0,
+  z: 0,
+  gx: 0,
+  gy: 0,
+  gz: 0,
+  pressure: 0,
+};
 
 let socket: Socket | null = null;
 
@@ -116,14 +133,19 @@ export default function Dashboard() {
 
     if (isSimulating) {
       interval = setInterval(() => {
-        setSensorData({
-          x: Number((Math.random() * 2 - 1).toFixed(3)),
-          y: Number((Math.random() * 2 - 1).toFixed(3)),
-          z: Number((Math.random() * 2 - 1).toFixed(3)),
-          gx: Number((Math.random() * 250 - 125).toFixed(3)),
-          gy: Number((Math.random() * 250 - 125).toFixed(3)),
-          gz: Number((Math.random() * 250 - 125).toFixed(3)),
-        });
+          setSensorData({
+            roll: Number((Math.random() * 2 - 1).toFixed(3)),
+            pitch: Number((Math.random() * 2 - 1).toFixed(3)),
+            roll_deg: Number((Math.random() * 180 - 90).toFixed(1)),
+            pitch_deg: Number((Math.random() * 180 - 90).toFixed(1)),
+            x: Number((Math.random() * 2 - 1).toFixed(3)),
+            y: Number((Math.random() * 2 - 1).toFixed(3)),
+            z: Number((Math.random() * 2 - 1).toFixed(3)),
+            gx: Number((Math.random() * 250 - 125).toFixed(3)),
+            gy: Number((Math.random() * 250 - 125).toFixed(3)),
+            gz: Number((Math.random() * 250 - 125).toFixed(3)),
+            pressure: Number((Math.random() * 100).toFixed(1)),
+          });
       }, 500);
     }
 
@@ -131,6 +153,15 @@ export default function Dashboard() {
       if (interval) clearInterval(interval);
     };
   }, [isSimulating]);
+
+  useEffect(() => {
+    if (!showSensorData || isSimulating) return;
+
+    const requestSnapshot = () => socket?.emit("requestSensorSnapshot", { gloveId: "primary_glove" });
+    requestSnapshot();
+    const interval = setInterval(requestSnapshot, 500);
+    return () => clearInterval(interval);
+  }, [showSensorData, isSimulating]);
 
   const refreshStatus = async () => {
     const startedAt = performance.now();
@@ -322,7 +353,7 @@ export default function Dashboard() {
             </div>
           ) : (
             <div className="mt-5 grid gap-3 sm:grid-cols-3">
-              <InfoTile label="Latest roll input" value={sensorData.x.toFixed(3)} />
+              <InfoTile label="Latest roll input" value={sensorData.roll.toFixed(3)} />
               <InfoTile label="Sample source" value={sensorStatus.source ?? "none"} />
               <InfoTile label="Telemetry state" value={sensorStatus.lastUpdatedAt ? "available" : "idle"} />
             </div>
@@ -335,12 +366,17 @@ export default function Dashboard() {
 
 function normalizeSensorData(data: Partial<SensorData>): SensorData {
   return {
+    roll: Number(data.roll ?? data.x ?? 0),
+    pitch: Number(data.pitch ?? data.y ?? 0),
+    roll_deg: Number(data.roll_deg ?? 0),
+    pitch_deg: Number(data.pitch_deg ?? 0),
     x: Number(data.x ?? 0),
     y: Number(data.y ?? 0),
     z: Number(data.z ?? 0),
     gx: Number(data.gx ?? 0),
     gy: Number(data.gy ?? 0),
     gz: Number(data.gz ?? 0),
+    pressure: Number(data.pressure ?? 0),
   };
 }
 

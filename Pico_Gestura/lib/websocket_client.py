@@ -20,10 +20,11 @@ GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 class SimpleWebSocketClient:
-    def __init__(self, url, headers=None, timeout=5):
+    def __init__(self, url, headers=None, timeout=5, ca_der_path=None):
         self.url = url
         self.headers = headers or {}
         self.timeout = timeout
+        self.ca_der_path = ca_der_path
         self.sock = None
         self.parsed = parse_ws_url(url)
 
@@ -37,7 +38,17 @@ class SimpleWebSocketClient:
         sock.connect(addr)
 
         if self.parsed["secure"]:
-            sock = ussl.wrap_socket(sock, server_hostname=self.parsed["host"])
+            kwargs = {"server_hostname": self.parsed["host"]}
+            ca_data = load_ca(self.ca_der_path)
+            if ca_data:
+                kwargs["cadata"] = ca_data
+                kwargs["cert_reqs"] = 2
+            try:
+                sock = ussl.wrap_socket(sock, **kwargs)
+            except TypeError:
+                if ca_data:
+                    raise RuntimeError("CA DER validation is not supported by this firmware")
+                sock = ussl.wrap_socket(sock, server_hostname=self.parsed["host"])
 
         key = random_b64(16)
         request = [
@@ -199,3 +210,14 @@ def random_b64(length):
 def websocket_accept(key):
     sha1 = uhashlib.sha1((key + GUID).encode("utf-8"))
     return ubinascii.b2a_base64(sha1.digest()).strip().decode("utf-8")
+
+
+def load_ca(ca_der_path):
+    if not ca_der_path:
+        return None
+    try:
+        with open(ca_der_path, "rb") as f:
+            return f.read()
+    except OSError:
+        print("CA DER not found:", ca_der_path)
+        return None

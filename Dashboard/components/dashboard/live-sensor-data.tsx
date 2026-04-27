@@ -3,7 +3,7 @@
 import { Activity, Play, Pause } from "lucide-react";
 
 interface LiveSensorDataProps {
-  sensorData: { x: number; y: number; z: number; gx: number; gy: number; gz: number };
+  sensorData: { x: number; y: number; z: number; gx: number; gy: number; gz: number; pressure: number };
   isSimulating: boolean;
   onToggleSimulation: () => void;
 }
@@ -155,6 +155,21 @@ export function LiveSensorData({
               </div>
             </div>
           ))}
+        </div>
+      </div>
+
+      <div className="mt-6 space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-semibold text-chart-4">Pressure</span>
+          <span className="font-mono text-lg font-bold text-foreground tabular-nums">
+            {sensorData.pressure.toFixed(1)}%
+          </span>
+        </div>
+        <div className="h-3 w-full overflow-hidden rounded-full bg-secondary">
+          <div
+            className="h-full rounded-full bg-chart-4 transition-all duration-150"
+            style={{ width: `${Math.max(0, Math.min(100, sensorData.pressure))}%` }}
+          />
         </div>
       </div>
 

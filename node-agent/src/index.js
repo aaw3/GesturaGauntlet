@@ -7,6 +7,37 @@ function debug(...args) {
   if (DEBUG) console.log('[NodeAgent][debug]', ...args);
 }
 
+function nodeInterfacesFromEnv() {
+  const interfaces = [];
+  const lanUrls = parseUrlList(process.env.NODE_LAN_URLS || process.env.NODE_LAN_URL || process.env.NODE_LAN_WSS_URL || process.env.NODE_LAN_WS_URL);
+  const publicUrls = parseUrlList(process.env.NODE_PUBLIC_URLS || process.env.NODE_PUBLIC_URL);
+  const lanBasePriority = Number(process.env.NODE_LAN_PRIORITY || 10);
+  lanUrls.forEach((url, index) => {
+    interfaces.push({
+      kind: 'lan',
+      url,
+      priority: lanBasePriority + index,
+    });
+  });
+  const maxLanPriority = interfaces.reduce((max, item) => Math.max(max, item.priority), lanBasePriority);
+  const publicBasePriority = Math.max(Number(process.env.NODE_PUBLIC_PRIORITY || 50), maxLanPriority + 1);
+  publicUrls.forEach((url, index) => {
+    interfaces.push({
+      kind: 'public',
+      url,
+      priority: publicBasePriority + index,
+    });
+  });
+  return interfaces;
+}
+
+function parseUrlList(value) {
+  return String(value || '')
+    .split(',')
+    .map((url) => url.trim())
+    .filter(Boolean);
+}
+
 async function main() {
   const centralApiUrl = process.env.CENTRAL_API_URL || process.env.CENTRAL_URL || 'http://localhost:3001';
   const centralWsUrl = process.env.CENTRAL_WS_URL || centralApiUrl;
@@ -38,9 +69,7 @@ async function main() {
       id: nodeId,
       name: process.env.NODE_NAME || nodeId,
       token: nodeToken,
-      interfaces: process.env.NODE_LAN_URL
-        ? [{ kind: 'lan', url: process.env.NODE_LAN_URL, priority: 10 }]
-        : [],
+      interfaces: nodeInterfacesFromEnv(),
       metadata: { role: 'edge' },
     },
     managerAttachPort: Number(process.env.NODE_AGENT_PORT || 3201),

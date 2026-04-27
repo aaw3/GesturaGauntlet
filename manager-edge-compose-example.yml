@@ -12,8 +12,10 @@ services:
       NODE_NAME: Edge Node 1
       NODE_TOKEN: example-node-shared-token
       NODE_AGENT_PORT: 3201
-      NODE_LAN_URL: http://edge-node-host.local:3201
+      NODE_LAN_URLS: wss://edge-node-host.local:3201/glove,ws://edge-node-host.local:3201/glove
+      NODE_PUBLIC_URLS: wss://edge.example.dev/glove
       MANAGER_SHARED_TOKEN: example-manager-shared-token
+      PICO_API_TOKEN: example-pico-api-token
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

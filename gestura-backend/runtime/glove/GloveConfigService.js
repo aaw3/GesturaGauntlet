@@ -1,12 +1,14 @@
 const { clone } = require('../utils');
 
 const { randomUUID } = require('crypto');
+const { createHash } = require('crypto');
 
 class GloveConfigService {
-  constructor({ mappingService, deviceRegistry, managerService, persistence, telemetryService }) {
+  constructor({ mappingService, deviceRegistry, managerService, nodeRegistry, persistence, telemetryService }) {
     this.mappingService = mappingService;
     this.deviceRegistry = deviceRegistry;
     this.managerService = managerService;
+    this.nodeRegistry = nodeRegistry;
     this.persistence = persistence;
     this.telemetryService = telemetryService;
     this.routeStates = new Map();
@@ -25,6 +27,7 @@ class GloveConfigService {
         provenance: provenanceForDevice(device, managerById),
       })),
       managers,
+      endpoints: this.getEndpointMetadata(),
       routeStates: this.getRouteStates(),
       policy: {
         activeCommandBacklog: false,
@@ -36,6 +39,23 @@ class GloveConfigService {
 
   getRouteStates() {
     return Array.from(this.routeStates.values()).map(clone);
+  }
+
+  getEndpointMetadata() {
+    const nodes = this.nodeRegistry?.getAll?.() || [];
+    const endpoints = {
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      nodes: nodes.map((node) => ({
+        nodeId: node.id,
+        name: node.name,
+        online: node.online,
+        lastHeartbeatAt: node.lastHeartbeatAt,
+        interfaces: normalizeInterfaces(node.interfaces || []),
+      })),
+    };
+    endpoints.hash = stableHash(endpoints.nodes);
+    return endpoints;
   }
 
   upsertRouteState(state) {
@@ -78,6 +98,47 @@ function provenanceForDevice(device, managerById) {
     managerIconKey: manager?.metadata?.iconKey,
     managerColorKey: manager?.metadata?.colorKey,
   };
+}
+
+function normalizeInterfaces(interfaces = []) {
+  const normalized = [];
+  for (const item of interfaces) {
+    if (!['lan', 'public'].includes(item.kind)) continue;
+    for (const url of parseUrlList(item.urls || item.url)) {
+      normalized.push({
+        kind: item.kind,
+        url,
+        priority: Number(item.priority ?? (item.kind === 'lan' ? 10 : 50)),
+        tls: String(url).startsWith('wss://') || String(url).startsWith('https://'),
+      });
+    }
+  }
+  return orderInterfaces(normalized);
+}
+
+function orderInterfaces(interfaces) {
+  const lan = interfaces
+    .filter((item) => item.kind === 'lan')
+    .sort((left, right) => left.priority - right.priority)
+    .map((item, index) => ({ ...item, priority: index + 10 }));
+  const publicStart = lan.length ? lan[lan.length - 1].priority + 10 : 50;
+  const pub = interfaces
+    .filter((item) => item.kind === 'public')
+    .sort((left, right) => left.priority - right.priority)
+    .map((item, index) => ({ ...item, priority: publicStart + index }));
+  return [...lan, ...pub];
+}
+
+function parseUrlList(value) {
+  if (Array.isArray(value)) return value.map((url) => String(url).trim()).filter(Boolean);
+  return String(value || '')
+    .split(',')
+    .map((url) => url.trim())
+    .filter(Boolean);
+}
+
+function stableHash(value) {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
 module.exports = { GloveConfigService };

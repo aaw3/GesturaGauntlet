@@ -3,7 +3,10 @@ import network
 import uasyncio as asyncio
 import time
 import ujson
-from lib.env import load_env
+import math
+from lib.endpoint_cache import EndpointCache
+from lib.env import http_to_ws_url, load_env, ws_to_http_url
+from lib.http_client import get_json
 from lib.websocket_client import SimpleWebSocketClient
 from system_init import hardware_check, connect_wifi
 from modules.gui import GauntletGUI
@@ -20,6 +23,9 @@ GLOVE_WS_URL = env.get("GLOVE_WS_URL", "ws://localhost:3001/glove")
 GLOVE_ID = env.get("GLOVE_ID", "primary_glove")
 PICO_API_TOKEN = env.get("PICO_API_TOKEN", "")
 METRICS_INTERVAL_SEC = int(env.get("METRIC_INTERVAL_SEC", "300"))
+ACTION_SEND_INTERVAL_MS = int(env.get("ACTION_SEND_INTERVAL_MS", "250"))
+ENDPOINT_CACHE_PATH = env.get("ENDPOINT_CACHE_PATH", "endpoint_cache.json")
+CA_DER_PATH = env.get("CA_DER_PATH", "")
 
 led = machine.Pin("LED", machine.Pin.OUT)
 global_gui = None
@@ -32,40 +38,146 @@ def trigger_hardware_panic(error_code):
         time.sleep(0.1)
 
 
-def build_glove_ws_url():
-    separator = "&" if "?" in GLOVE_WS_URL else "?"
-    url = "{}{}gloveId={}".format(GLOVE_WS_URL, separator, GLOVE_ID)
+def build_glove_ws_url(base_url=None):
+    source_url = base_url or GLOVE_WS_URL
+    url = http_to_ws_url(source_url).split("?", 1)[0]
+    separator = "&" if "?" in url else "?"
+    url = "{}{}gloveId={}".format(url, separator, GLOVE_ID)
     if PICO_API_TOKEN:
         url = "{}&api_key={}".format(url, PICO_API_TOKEN)
     return url
+
+
+def with_pico_auth(url):
+    if not PICO_API_TOKEN:
+        return url
+    separator = "&" if "?" in url else "?"
+    return "{}{}api_key={}".format(url, separator, PICO_API_TOKEN)
+
+
+def central_glove_api_url(suffix):
+    base = ws_to_http_url(GLOVE_WS_URL).split("?", 1)[0]
+    if base.endswith("/glove"):
+        base = base[:-len("/glove")]
+    return "{}/api/gloves/{}/{}".format(base.rstrip("/"), GLOVE_ID, suffix)
+
+
+def config_url_for_endpoint(endpoint_url):
+    http_url = ws_to_http_url(endpoint_url).split("?", 1)[0].rstrip("/")
+    if http_url.endswith("/glove"):
+        http_url = http_url[:-len("/glove")]
+    return "{}/api/gloves/{}/config".format(http_url, GLOVE_ID)
+
+
+def is_allowed_endpoint(interface):
+    url = interface.get("url", "")
+    kind = interface.get("kind", "")
+    if url.startswith("wss://"):
+        return True
+    return kind == "lan" and url.startswith("ws://")
+
+
+def fetch_json(url):
+    return get_json(with_pico_auth(url), ca_der_path=CA_DER_PATH)
+
+
+def update_runtime_config(store, config, source):
+    endpoints = config.get("endpoints")
+    store.update(
+        mappings=config.get("mappings", []),
+        devices=config.get("devices", []),
+        managers=config.get("managers", []),
+        route_states=config.get("routeStates", []),
+        endpoint_metadata=endpoints,
+        degraded=False,
+        config_source=source,
+    )
+    return endpoints
+
+
+def bootstrap_runtime_config(store):
+    cache = EndpointCache(ENDPOINT_CACHE_PATH)
+
+    if not cache.data.get("nodes"):
+        try:
+            metadata = fetch_json(central_glove_api_url("endpoints"))
+            cache.update_if_changed(metadata, ca_der_path=CA_DER_PATH)
+            store.update(endpoint_metadata=metadata)
+            print("Loaded endpoint metadata from central")
+        except Exception as exc:
+            print("Central endpoint metadata fetch failed:", exc)
+
+    attempts = []
+    seen = {}
+    for interface in cache.interfaces():
+        if not is_allowed_endpoint(interface):
+            continue
+        url = config_url_for_endpoint(interface.get("url", ""))
+        if not seen.get(url):
+            attempts.append(("edge", url, interface))
+            seen[url] = True
+
+    central_url = central_glove_api_url("config")
+    if not seen.get(central_url):
+        attempts.append(("central", central_url, None))
+
+    for source, url, interface in attempts:
+        try:
+            config = fetch_json(url)
+            endpoints = update_runtime_config(store, config, source)
+            if endpoints:
+                cache.update_if_changed(endpoints, ca_der_path=CA_DER_PATH)
+            if interface:
+                cache.set_last_good(interface.get("nodeId", ""))
+            print("Fetched glove config from", source, url)
+            return interface.get("url") if interface else GLOVE_WS_URL
+        except Exception as exc:
+            print("Glove config fetch failed from {}: {}".format(url, exc))
+
+    store.update(degraded=True, connected=False, mappings=[], action="OFFLINE")
+    return None
 
 
 async def network_task(gui, store):
     reconnect_delay_ms = 500
     max_delay_ms = 5000
     transport = None
+    active_endpoint = store.get("active_endpoint")
     messages_sent = 0
     messages_failed = 0
     last_metrics_ms = 0
+    last_action_ms = 0
+    last_action_values = {}
     pending_metrics_sent_at = None
 
     while True:
         try:
-            transport = SimpleWebSocketClient(build_glove_ws_url())
+            if not active_endpoint:
+                active_endpoint = bootstrap_runtime_config(store)
+                store.update(active_endpoint=active_endpoint)
+            if not active_endpoint:
+                gui.update_state(connected=False, action="OFFLINE")
+                await asyncio.sleep_ms(reconnect_delay_ms)
+                reconnect_delay_ms = min(max_delay_ms, reconnect_delay_ms * 2)
+                continue
+
+            ws_url = build_glove_ws_url(active_endpoint)
+            transport = SimpleWebSocketClient(ws_url, ca_der_path=CA_DER_PATH)
             transport.connect()
             transport.send_json({
                 "type": "hello",
                 "gloveId": GLOVE_ID,
                 "ts": time.ticks_ms(),
             })
-            store.update(connected=True, transport=transport)
-            gui.update_state(connected=True)
-            print("Connected to Gestura websocket:", build_glove_ws_url())
+            store.update(connected=True, transport=transport, degraded=False, active_endpoint=active_endpoint)
+            gui.update_state(connected=True, action="READY")
+            print("Connected to Gestura websocket:", ws_url)
             reconnect_delay_ms = 500
         except Exception as e:
             print("WebSocket connection failed:", e)
             messages_failed += 1
-            store.update(connected=False, transport=None)
+            active_endpoint = None
+            store.update(connected=False, transport=None, active_endpoint=None)
             gui.update_state(connected=False)
             await asyncio.sleep_ms(reconnect_delay_ms)
             reconnect_delay_ms = min(max_delay_ms, reconnect_delay_ms * 2)
@@ -81,23 +193,26 @@ async def network_task(gui, store):
                     handle_server_message(incoming, gui, store)
 
                 state = store.snapshot()
-                payload = {
-                    "type": "sensor_update",
-                    "gloveId": GLOVE_ID,
-                    "ts": time.ticks_ms(),
-                    "mode": state.get("mode", "PASSIVE").lower(),
-                    "x": state.get("accel_x", 0.0),
-                    "y": state.get("accel_y", 0.0),
-                    "z": state.get("accel_z", 0.0),
-                    "gx": state.get("gyro_x", 0.0),
-                    "gy": state.get("gyro_y", 0.0),
-                    "gz": state.get("gyro_z", 0.0),
-                    "pressure": state.get("pressure", 0.0),
-                }
-                transport.send_json(payload)
-                messages_sent += 1
-
                 current_ms = time.ticks_ms()
+                if (
+                    state.get("mode") == "ACTIVE"
+                    and time.ticks_diff(current_ms, last_action_ms) >= ACTION_SEND_INTERVAL_MS
+                ):
+                    actions = build_mapped_actions(state, last_action_values)
+                    actions.extend(build_event_actions(state, store.drain_inputs()))
+                    for action in actions:
+                        transport.send_json({
+                            "type": "mapped_action",
+                            "gloveId": GLOVE_ID,
+                            "ts": current_ms,
+                            "action": action,
+                        })
+                        messages_sent += 1
+                    if actions:
+                        last_action_ms = current_ms
+                elif state.get("mode") != "ACTIVE":
+                    store.drain_inputs()
+
                 if time.ticks_diff(current_ms, last_metrics_ms) >= METRICS_INTERVAL_SEC * 1000:
                     metric_payload = build_device_metrics(
                         state,
@@ -118,6 +233,7 @@ async def network_task(gui, store):
                 messages_failed += 1
                 gui.update_state(connected=False)
                 store.update(connected=False, transport=None)
+                active_endpoint = None
                 try:
                     transport.close()
                 except Exception:
@@ -141,6 +257,140 @@ def build_device_metrics(state, messages_sent, messages_failed):
     }
 
 
+def build_sensor_snapshot(state):
+    return {
+        "type": "sensor_snapshot",
+        "gloveId": GLOVE_ID,
+        "ts": time.ticks_ms(),
+        "mode": str(state.get("mode", "PASSIVE")).lower(),
+        "roll": state.get("roll", 0.0),
+        "pitch": state.get("pitch", 0.0),
+        "roll_deg": state.get("roll_deg", 0.0),
+        "pitch_deg": state.get("pitch_deg", 0.0),
+        "x": state.get("accel_x", 0.0),
+        "y": state.get("accel_y", 0.0),
+        "z": state.get("accel_z", 0.0),
+        "gx": state.get("gyro_x", 0.0),
+        "gy": state.get("gyro_y", 0.0),
+        "gz": state.get("gyro_z", 0.0),
+        "pressure": state.get("pressure", 0.0),
+    }
+
+
+def build_mapped_actions(state, last_values):
+    actions = []
+    for mapping in state.get("mappings", []):
+        if not mapping.get("enabled", True):
+            continue
+        source = mapping.get("inputSource", "")
+        if source not in ("glove.roll", "glove.pitch"):
+            continue
+        value = input_value_for_source(source, state)
+        if value is None:
+            continue
+        mapped_value = apply_mapping_transform(value, mapping)
+        key = mapping.get("id") or "{}:{}".format(mapping.get("targetDeviceId"), mapping.get("targetCapabilityId"))
+        previous = last_values.get(key)
+        if previous is not None and abs(float(mapped_value) - float(previous)) < effective_step(mapping):
+            continue
+        last_values[key] = mapped_value
+        actions.append({
+            "mappingId": mapping.get("id"),
+            "deviceId": mapping.get("targetDeviceId"),
+            "capabilityId": mapping.get("targetCapabilityId"),
+            "commandType": command_type_for_mapping(mapping),
+            "value": mapped_value,
+            "inputSource": source,
+        })
+    return actions
+
+
+def build_event_actions(state, events):
+    if not events:
+        return []
+    actions = []
+    mappings = state.get("mappings", [])
+    for event in events:
+        source = event.get("source")
+        if not source:
+            continue
+        for mapping in mappings:
+            if not mapping.get("enabled", True):
+                continue
+            if mapping.get("inputSource") != source:
+                continue
+            value = apply_mapping_transform(event.get("value", 1), mapping)
+            actions.append({
+                "mappingId": mapping.get("id"),
+                "deviceId": mapping.get("targetDeviceId"),
+                "capabilityId": mapping.get("targetCapabilityId"),
+                "commandType": command_type_for_mapping(mapping),
+                "value": value,
+                "inputSource": source,
+                "event": event,
+            })
+    return actions
+
+
+def input_value_for_source(source, state):
+    if source == "glove.roll":
+        return state.get("roll", 0.0)
+    if source == "glove.pitch":
+        return state.get("pitch", 0.0)
+    return None
+
+
+def command_type_for_mapping(mapping):
+    mode = str(mapping.get("mode", "")).lower()
+    if mode == "toggle":
+        return "toggle"
+    if mode == "scene":
+        return "scene"
+    return "set"
+
+
+def apply_mapping_transform(value, mapping):
+    transform = mapping.get("transform", {}) or {}
+    minimum = float(transform.get("min", 0))
+    maximum = float(transform.get("max", 100))
+    deadzone = abs(float(transform.get("deadzone", 0)))
+    offset = float(transform.get("offset", 0))
+    if abs(float(value)) < deadzone:
+        value = 0
+    normalized = max(-1, min(1, float(value) + offset))
+    if transform.get("invert"):
+        normalized = -normalized
+    mapped = minimum + ((normalized + 1) / 2) * (maximum - minimum)
+    step = float(transform.get("step", 0) or 0)
+    if step > 0:
+        mapped = round(mapped / step) * step
+    return max(minimum, min(maximum, mapped))
+
+
+def effective_step(mapping):
+    transform = mapping.get("transform", {}) or {}
+    step = float(transform.get("step", 0) or 0)
+    return step if step > 0 else 0.01
+
+
+def calculate_orientation(accel_data):
+    ax = float(accel_data.get("x", 0.0))
+    ay = float(accel_data.get("y", 0.0))
+    az = float(accel_data.get("z", 0.0))
+    roll_deg = math.atan2(ay, az) * 57.2957795
+    pitch_deg = math.atan2(-ax, math.sqrt((ay * ay) + (az * az))) * 57.2957795
+    return {
+        "roll": clamp(roll_deg / 90.0, -1.0, 1.0),
+        "pitch": clamp(pitch_deg / 90.0, -1.0, 1.0),
+        "roll_deg": roll_deg,
+        "pitch_deg": pitch_deg,
+    }
+
+
+def clamp(value, minimum, maximum):
+    return max(minimum, min(maximum, value))
+
+
 def get_wifi_rssi():
     try:
         wlan = network.WLAN(network.STA_IF)
@@ -153,11 +403,19 @@ def get_wifi_rssi():
 
 def handle_server_message(message, gui, store):
     message_type = message.get("type")
+    if message_type == "request_sensor_snapshot":
+        transport = store.get("transport")
+        if transport:
+            transport.send_json(build_sensor_snapshot(store.snapshot()))
+        return
     if message_type in ("welcome", "config_snapshot", "mode_update"):
         mode = str(message.get("mode", "")).upper()
         if mode in ("ACTIVE", "PASSIVE"):
             store.update(mode=mode)
             gui.update_state(mode=mode)
+        config = message.get("config")
+        if isinstance(config, dict):
+            update_runtime_config(store, config, "websocket")
 
 
 async def sensor_task(gui, mpu, fsr, store):
@@ -176,6 +434,7 @@ async def sensor_task(gui, mpu, fsr, store):
 
             accel_data = mpu.get_accel()
             gyro_data = mpu.get_gyro()
+            orientation = calculate_orientation(accel_data)
 
             fsr.tick()
             pressure = fsr.get_pressure_percentage()
@@ -189,6 +448,10 @@ async def sensor_task(gui, mpu, fsr, store):
                 gyro_x=gyro_data["x"],
                 gyro_y=gyro_data["y"],
                 gyro_z=gyro_data["z"],
+                roll=orientation["roll"],
+                pitch=orientation["pitch"],
+                roll_deg=orientation["roll_deg"],
+                pitch_deg=orientation["pitch_deg"],
                 pressure=pressure,
             )
 

@@ -33,7 +33,7 @@ function markRouteFailure(state, routeKind, now = Date.now(), cooldownMs = DEFAU
   if (routeKind === 'lan') {
     next.lastLanFailureAt = now;
     next.lanCooldownUntil = now + cooldownMs;
-    if (next.activeRoute === 'lan') next.activeRoute = 'public';
+    if (next.activeRoute === routeKind) next.activeRoute = 'public';
   }
   return next;
 }

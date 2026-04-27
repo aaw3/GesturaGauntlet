@@ -24,6 +24,10 @@ class LocalNodeCache {
     return Array.from(this.deviceInventory.values()).flat().map(clone);
   }
 
+  getDeviceById(deviceId) {
+    return this.getAllDevices().find((device) => device.id === deviceId) || null;
+  }
+
   setDeviceState(deviceId, state) {
     this.deviceStates.set(deviceId, clone(state));
   }

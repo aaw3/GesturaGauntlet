@@ -41,6 +41,9 @@ class NodeAgent {
       onDetach: (socketId) => this.detachManagerBySocket(socketId),
       onInventory: (managerId, devices) => this.updateManagerInventory(managerId, devices),
       onHealth: (managerId, health) => this.updateManagerHealth(managerId, health),
+      onGloveAction: (action) => this.executeGloveAction(action),
+      onSensorSnapshot: (snapshot) => this.forwardSensorSnapshot(snapshot),
+      getConfigSnapshot: () => this.cache.getConfigSnapshot(),
     });
   }
 
@@ -83,6 +86,9 @@ class NodeAgent {
     this.socket.on('manager:clearStorage', (payload, ack) =>
       this.handleManagerCall(payload, ack, 'clearStorage')
     );
+    this.socket.on('glove:requestSensorSnapshot', (payload = {}) => {
+      this.managerAttachmentServer.requestSensorSnapshot(payload.gloveId);
+    });
 
     this.telemetry.start((events) => this.emitWithAck('telemetry:batch', { events }));
     this.managerAttachmentServer.start();
@@ -233,6 +239,67 @@ class NodeAgent {
       }
       ack?.({ ok: false, error: err.message });
     }
+  }
+
+  async executeGloveAction(action) {
+    const device = this.cache.getDeviceById?.(action.deviceId);
+    if (!device) {
+      return { ok: false, deviceId: action.deviceId, capabilityId: action.capabilityId, message: 'Device not cached on edge node' };
+    }
+    const manager = this.managers.get(device.managerId);
+    if (!manager || typeof manager.executeAction !== 'function') {
+      return { ok: false, deviceId: action.deviceId, capabilityId: action.capabilityId, message: `Manager ${device.managerId} is not attached` };
+    }
+
+    const startedAt = Date.now();
+    try {
+      const result = await manager.executeAction(action);
+      this.telemetry.record({
+        eventType: 'route_attempt',
+        managerId: device.managerId,
+        payload: {
+          managerId: device.managerId,
+          nodeId: this.node.id,
+          deviceId: action.deviceId,
+          target_device_id: action.deviceId,
+          attemptedRoute: 'lan',
+          finalRoute: 'lan',
+          route_path: 'local_edge',
+          success: Boolean(result?.ok),
+          action_success: Boolean(result?.ok),
+          latencyMs: Date.now() - startedAt,
+          route_latency_ms: Date.now() - startedAt,
+          message: result?.message,
+          failure_reason: result?.ok ? undefined : result?.message,
+        },
+      });
+      return result;
+    } catch (err) {
+      this.telemetry.record({
+        eventType: 'route_attempt',
+        managerId: device.managerId,
+        payload: {
+          managerId: device.managerId,
+          nodeId: this.node.id,
+          deviceId: action.deviceId,
+          target_device_id: action.deviceId,
+          attemptedRoute: 'lan',
+          finalRoute: 'lan',
+          route_path: 'local_edge',
+          success: false,
+          action_success: false,
+          latencyMs: Date.now() - startedAt,
+          route_latency_ms: Date.now() - startedAt,
+          message: err.message,
+          failure_reason: err.message,
+        },
+      });
+      return { ok: false, deviceId: action.deviceId, capabilityId: action.capabilityId, message: err.message };
+    }
+  }
+
+  forwardSensorSnapshot(snapshot) {
+    this.socket?.emit('glove:sensorSnapshot', { ...snapshot, nodeId: this.node.id });
   }
 
   async attachManager(manager) {

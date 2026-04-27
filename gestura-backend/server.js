@@ -101,6 +101,7 @@ const gloveConfigService = new GloveConfigService({
   mappingService,
   deviceRegistry,
   managerService,
+  nodeRegistry,
   persistence,
   telemetryService,
 });
@@ -214,6 +215,12 @@ io.of('/').on('connection', (socket) => {
     }
   });
 
+  socket.on('requestSensorSnapshot', (payload = {}, ack) => {
+    const direct = gloveSocketHub?.requestSensorSnapshot?.(payload.gloveId) || 0;
+    io.of('/nodes').emit('glove:requestSensorSnapshot', { gloveId: payload.gloveId });
+    ack?.({ ok: direct > 0 || io.of('/nodes').sockets.size > 0, requested: direct });
+  });
+
   socket.on('disconnect', () => {
     console.log('[WS] Dashboard disconnected:', socket.id);
   });
@@ -274,6 +281,7 @@ gloveSocketHub = createGloveSocketHub({
   authService,
   gloveConfigService,
   telemetryService,
+  actionRouter,
   onSensorUpdate: handleSensorUpdate,
   getMode: () => currentMode,
   setMode,
