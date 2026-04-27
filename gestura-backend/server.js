@@ -5,7 +5,6 @@ const cors = require('cors');
 const cookieParser = require("cookie-parser");
 
 
-const { SensorStore } = require('./runtime/sensorStore');
 const { DeviceRegistry } = require('./runtime/services/DeviceRegistry');
 const { ManagerService } = require('./runtime/services/ManagerService');
 const { DeviceSyncService } = require('./runtime/services/DeviceSyncService');
@@ -31,6 +30,7 @@ const { createTelemetryRouter } = require('./runtime/routes/telemetry');
 const { createSystemRouter } = require('./runtime/routes/system');
 const { createGloveSocketHub } = require('./runtime/ws/gloveSocket');
 const { registerNodeAgentSocket } = require('./runtime/ws/nodeAgentSocket');
+const { normalizeSensorPayload } = require('./runtime/utils');
 
 try {
   if (typeof process.loadEnvFile === 'function') process.loadEnvFile();
@@ -78,9 +78,6 @@ const io = new Server(server, {
   cors: { origin: true, methods: ['GET', 'POST'], credentials: true },
 });
 
-const SENSOR_HISTORY_SIZE = Number(process.env.SENSOR_HISTORY_SIZE || 200);
-
-const sensorStore = new SensorStore({ historySize: SENSOR_HISTORY_SIZE });
 const persistence = new PostgresStore();
 const deviceRegistry = new DeviceRegistry({ persistence });
 const nodeRegistry = new NodeRegistry({ persistence });
@@ -101,7 +98,6 @@ const gloveConfigService = new GloveConfigService({
 });
 const authService = new AuthService();
 let gloveSocketHub = null;
-const gloveTelemetryLastSentAt = new Map();
 
 let currentMode = 'passive';
 
@@ -125,40 +121,13 @@ function setMode(mode, source = 'api') {
 }
 
 async function handleSensorUpdate(data, source = 'unknown') {
-  const latest = sensorStore.record(data, source);
+  const latest = {
+    ...normalizeSensorPayload(data),
+    timestamp: new Date().toISOString(),
+    source,
+  };
   io.emit('sensorData', latest);
-  io.emit('sensorStatus', sensorStore.getState());
-  maybeRecordGloveStatus(data, source);
   return latest;
-}
-
-function maybeRecordGloveStatus(data = {}, source = 'unknown') {
-  const intervalMs = Number(process.env.GLOVE_STATUS_TELEMETRY_INTERVAL_MS || 5000);
-  const gloveId = data.gloveId || data.payload?.gloveId || source;
-  const now = Date.now();
-  const previous = gloveTelemetryLastSentAt.get(gloveId) || 0;
-  if (now - previous < intervalMs) return;
-  gloveTelemetryLastSentAt.set(gloveId, now);
-
-  void telemetryService.ingestBatch([
-    {
-      ts: now,
-      eventType: 'glove_status',
-      gloveId,
-      payload: {
-        gloveId,
-        source,
-        wifi_rssi: data.wifi_rssi ?? data.wifiRssi ?? data.rssi,
-        uptime_sec: data.uptime_sec ?? data.uptimeSec,
-        mode: currentMode,
-        selected_device_id: data.selected_device_id ?? data.selectedDeviceId,
-        selected_action: data.selected_action ?? data.selectedAction,
-        rtt_ms: data.rtt_ms ?? data.rttMs,
-        messages_sent: data.messages_sent ?? data.messagesSent,
-        messages_failed: data.messages_failed ?? data.messagesFailed,
-      },
-    },
-  ]);
 }
 
 function publicStatus() {
@@ -166,7 +135,6 @@ function publicStatus() {
   return {
     mode: currentMode,
     system,
-    sensor: sensorStore.getState(),
     realtime: {
       dashboardSocketPath: '/',
       gloveSocketPath: '/glove',
@@ -221,7 +189,6 @@ io.of('/').on('connection', (socket) => {
   console.log('[WS] Dashboard connected:', socket.id);
 
   socket.emit('modeUpdate', currentMode);
-  socket.emit('sensorStatus', sensorStore.getState());
   socket.emit('managers', managerService.getInfos());
   socket.emit('nodes', nodeRegistry.getAll());
   socket.emit('devices', deviceRegistry.getAll());
@@ -248,8 +215,8 @@ app.use('/api/auth', createAuthRouter({ authService }));
 
 app.post('/api/data', authService.requireDashboardOrPicoToken(), async (req, res) => {
   try {
-    const latest = await handleSensorUpdate(req.body, 'http');
-    res.json({ mode: currentMode, sensor: latest });
+    await handleSensorUpdate(req.body, 'http');
+    res.json({ ok: true, mode: currentMode });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -257,14 +224,6 @@ app.post('/api/data', authService.requireDashboardOrPicoToken(), async (req, res
 
 app.get('/api/status', authService.requireDashboardAuth(), (req, res) => {
   res.json(publicStatus());
-});
-
-app.get('/api/sensors/latest', authService.requireDashboardAuth(), (req, res) => {
-  res.json(sensorStore.getState().latest || {});
-});
-
-app.get('/api/sensors/history', authService.requireDashboardAuth(), (req, res) => {
-  res.json(sensorStore.getHistory());
 });
 
 app.post('/api/mode', authService.requireDashboardOrPicoToken(), (req, res) => {

@@ -3,9 +3,6 @@
 
 PORT=3001
 
-# Dashboard sensor sample history retained by the backend.
-SENSOR_HISTORY_SIZE=200
-
 # Optional Postgres persistence. When unset, managers and configuration stay in memory.
 DATABASE_URL=postgres://gestura:gestura@localhost:5432/gestura
 DATABASE_SSL=false
@@ -31,7 +28,6 @@ INFLUXDB_URL=http://localhost:8086
 INFLUXDB_TOKEN=replace-with-influx-token
 INFLUXDB_ORG=gestura
 INFLUXDB_BUCKET=gestura_metrics
-GLOVE_STATUS_TELEMETRY_INTERVAL_MS=5000
 
 # Node-agent process examples:
 # CENTRAL_API_URL=http://localhost:3001

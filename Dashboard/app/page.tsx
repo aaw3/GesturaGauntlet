@@ -29,7 +29,6 @@ type NetworkStatus = "connected" | "disconnected" | "unknown";
 type GloveMode = "active" | "passive";
 
 interface SensorStatus {
-  latest: (SensorData & { timestamp?: string }) | null;
   sampleCount: number;
   lastUpdatedAt: string | null;
   source: string | null;
@@ -57,7 +56,6 @@ export default function Dashboard() {
   const [deviceCount, setDeviceCount] = useState(0);
   const [sensorData, setSensorData] = useState<SensorData>(emptySensorData);
   const [sensorStatus, setSensorStatus] = useState<SensorStatus>({
-    latest: null,
     sampleCount: 0,
     lastUpdatedAt: null,
     source: null,
@@ -92,24 +90,18 @@ export default function Dashboard() {
       }
     });
 
-    socket.on("sensorStatus", (status: SensorStatus) => {
-      setSensorStatus(status);
-      if (status.latest) setSensorData(normalizeSensorData(status.latest));
-    });
-
     socket.on("managers", (managers: unknown[]) => {
       setManagerCount(Array.isArray(managers) ? managers.length : 0);
     });
 
-    socket.on("sensorData", (data: Partial<SensorData> & { timestamp?: string }) => {
+    socket.on("sensorData", (data: Partial<SensorData> & { timestamp?: string; source?: string }) => {
       if (isSimulating) return;
       const normalized = normalizeSensorData(data);
       setSensorData(normalized);
       setSensorStatus((current) => ({
-        latest: { ...normalized, timestamp: data.timestamp },
         sampleCount: current.sampleCount + 1,
         lastUpdatedAt: data.timestamp ?? new Date().toISOString(),
-        source: current.source ?? "websocket",
+        source: data.source ?? current.source ?? "websocket",
       }));
     });
 
@@ -149,8 +141,6 @@ export default function Dashboard() {
       setStatusLatencyMs(Math.round(performance.now() - startedAt));
       setLastStatusSync(new Date().toLocaleTimeString());
       if (data.mode === "active" || data.mode === "passive") setActiveMode(data.mode);
-      if (data.sensor) setSensorStatus(data.sensor);
-      if (data.sensor?.latest) setSensorData(normalizeSensorData(data.sensor.latest));
       if (Array.isArray(data.managers)) setManagerCount(data.managers.length);
       if (typeof data.deviceCount === "number") setDeviceCount(data.deviceCount);
     } catch {
