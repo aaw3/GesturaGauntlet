@@ -16,7 +16,7 @@ const { PostgresStore } = require('./runtime/persistence/PostgresStore');
 const { NodeRegistry } = require('./runtime/registries/NodeRegistry');
 const { RouteMetricsService } = require('./runtime/metrics/RouteMetricsService');
 const { TelemetryService } = require('./runtime/metrics/TelemetryService');
-const { GrafanaTelemetrySink } = require('./runtime/metrics/GrafanaTelemetrySink');
+const { InfluxTelemetrySink } = require('./runtime/metrics/InfluxTelemetrySink');
 const { GloveConfigService } = require('./runtime/glove/GloveConfigService');
 const { AuthService } = require('./runtime/auth/AuthService');
 const { createAuthRouter } = require('./runtime/routes/auth');
@@ -86,8 +86,8 @@ const deviceRegistry = new DeviceRegistry({ persistence });
 const nodeRegistry = new NodeRegistry({ persistence });
 const managerService = new ManagerService({ persistence, nodeRegistry });
 const deviceSyncService = new DeviceSyncService(managerService, deviceRegistry, { persistence });
-const grafanaSink = new GrafanaTelemetrySink();
-const telemetryService = new TelemetryService({ persistence, grafanaSink });
+const influxTelemetrySink = new InfluxTelemetrySink();
+const telemetryService = new TelemetryService({ persistence, telemetrySink: influxTelemetrySink });
 const routeMetricsService = new RouteMetricsService({ persistence, telemetryService });
 const actionRouter = new ActionRouter(managerService, deviceRegistry, { routeMetricsService });
 const mappingService = new MappingService({ persistence });
@@ -101,6 +101,7 @@ const gloveConfigService = new GloveConfigService({
 });
 const authService = new AuthService();
 let gloveSocketHub = null;
+const gloveTelemetryLastSentAt = new Map();
 
 let currentMode = 'passive';
 
@@ -114,6 +115,12 @@ function setMode(mode, source = 'api') {
   console.log(`[Mode] ${source} set mode to ${currentMode}`);
   io.emit('modeUpdate', currentMode);
   gloveSocketHub?.broadcastModeUpdate(currentMode);
+  void telemetryService.ingestBatch([
+    {
+      eventType: 'mode_changed',
+      payload: { mode: currentMode, source },
+    },
+  ]);
   return currentMode;
 }
 
@@ -121,7 +128,37 @@ async function handleSensorUpdate(data, source = 'unknown') {
   const latest = sensorStore.record(data, source);
   io.emit('sensorData', latest);
   io.emit('sensorStatus', sensorStore.getState());
+  maybeRecordGloveStatus(data, source);
   return latest;
+}
+
+function maybeRecordGloveStatus(data = {}, source = 'unknown') {
+  const intervalMs = Number(process.env.GLOVE_STATUS_TELEMETRY_INTERVAL_MS || 5000);
+  const gloveId = data.gloveId || data.payload?.gloveId || source;
+  const now = Date.now();
+  const previous = gloveTelemetryLastSentAt.get(gloveId) || 0;
+  if (now - previous < intervalMs) return;
+  gloveTelemetryLastSentAt.set(gloveId, now);
+
+  void telemetryService.ingestBatch([
+    {
+      ts: now,
+      eventType: 'glove_status',
+      gloveId,
+      payload: {
+        gloveId,
+        source,
+        wifi_rssi: data.wifi_rssi ?? data.wifiRssi ?? data.rssi,
+        uptime_sec: data.uptime_sec ?? data.uptimeSec,
+        mode: currentMode,
+        selected_device_id: data.selected_device_id ?? data.selectedDeviceId,
+        selected_action: data.selected_action ?? data.selectedAction,
+        rtt_ms: data.rtt_ms ?? data.rttMs,
+        messages_sent: data.messages_sent ?? data.messagesSent,
+        messages_failed: data.messages_failed ?? data.messagesFailed,
+      },
+    },
+  ]);
 }
 
 function publicStatus() {
@@ -138,7 +175,7 @@ function publicStatus() {
     nodes: nodeRegistry.getAll(),
     routeMetrics: routeMetricsService.list().slice(-20),
     telemetry: telemetryService.list().slice(-20),
-    grafana: system.grafana,
+    influxdb: system.influxdb,
     deviceCount: deviceRegistry.getAll().length,
   };
 }
@@ -154,11 +191,11 @@ function systemStatus() {
       configured: Boolean(process.env.DATABASE_URL),
       connected: persistence.enabled,
     },
-    grafana: {
-      enabled: grafanaSink.enabled,
-      status: grafanaSink.enabled ? (grafanaSink.lastError ? 'error' : 'connected') : 'disabled',
-      lastError: grafanaSink.lastError || null,
-      lastSuccessAt: grafanaSink.lastSuccessAt || null,
+    influxdb: {
+      enabled: influxTelemetrySink.enabled,
+      status: influxTelemetrySink.enabled ? (influxTelemetrySink.lastError ? 'error' : 'connected') : 'disabled',
+      lastError: influxTelemetrySink.lastError || null,
+      lastSuccessAt: influxTelemetrySink.lastSuccessAt || null,
     },
     websocketHub: {
       online: true,
@@ -249,7 +286,7 @@ const services = {
   nodeRegistry,
   routeMetricsService,
   telemetryService,
-  grafanaSink,
+  influxTelemetrySink,
   gloveConfigService,
   systemStatus,
   authService,

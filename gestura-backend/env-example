@@ -26,10 +26,12 @@ PICO_API_TOKEN=replace-with-pico-bearer-token
 # Optional per-node token map instead of NODE_SHARED_TOKEN.
 # NODE_TOKEN_MAP={"pi-edge-1":"secret-1","pi-edge-2":"secret-2"}
 
-# Optional Grafana annotation upload for telemetry. Leave unset to store telemetry only in Postgres/memory.
-GRAFANA_URL=
-GRAFANA_API_KEY=
-GRAFANA_ORG_ID=
+# Optional InfluxDB telemetry upload. Leave unset to store telemetry only in Postgres/memory.
+INFLUXDB_URL=http://localhost:8086
+INFLUXDB_TOKEN=replace-with-influx-token
+INFLUXDB_ORG=gestura
+INFLUXDB_BUCKET=gestura_metrics
+GLOVE_STATUS_TELEMETRY_INTERVAL_MS=5000
 
 # Node-agent process examples:
 # CENTRAL_API_URL=http://localhost:3001

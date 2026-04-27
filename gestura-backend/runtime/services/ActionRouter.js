@@ -44,22 +44,34 @@ class ActionRouter {
       this.routeMetricsService?.record?.({
         managerId: device.managerId,
         deviceId: action.deviceId,
+        target_device_id: action.deviceId,
         attemptedRoute: route,
         finalRoute: route,
+        route_path: route === 'lan' ? 'local_edge' : 'central_server',
         success: Boolean(result?.ok),
+        action_success: Boolean(result?.ok),
+        fallback_used: false,
         latencyMs: Date.now() - startedAt,
+        route_latency_ms: Date.now() - startedAt,
         message: result?.message,
+        failure_reason: result?.ok ? undefined : result?.message,
       });
       return result;
     } catch (err) {
       this.routeMetricsService?.record?.({
         managerId: device.managerId,
         deviceId: action.deviceId,
+        target_device_id: action.deviceId,
         attemptedRoute: route,
         finalRoute: route,
+        route_path: route === 'lan' ? 'local_edge' : 'central_server',
         success: false,
+        action_success: false,
+        fallback_used: false,
         latencyMs: Date.now() - startedAt,
+        route_latency_ms: Date.now() - startedAt,
         message: err.message,
+        failure_reason: err.message,
       });
       throw err;
     }

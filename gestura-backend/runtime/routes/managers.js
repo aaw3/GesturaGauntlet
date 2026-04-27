@@ -1,6 +1,6 @@
 const express = require('express');
 
-function createManagersRouter({ managerService, deviceRegistry, deviceSyncService, mappingService }) {
+function createManagersRouter({ managerService, deviceRegistry, deviceSyncService, mappingService, telemetryService }) {
   const router = express.Router();
 
   router.get('/', (req, res) => {
@@ -47,11 +47,29 @@ function createManagersRouter({ managerService, deviceRegistry, deviceSyncServic
       return;
     }
 
+    await telemetryService?.ingestBatch?.([
+      {
+        eventType: 'discovery_started',
+        managerId: req.params.managerId,
+        payload: { managerId: req.params.managerId, source: 'api' },
+      },
+    ]);
+
+    let discoverResult = null;
     if (typeof manager.discover === 'function') {
-      await manager.discover();
+      discoverResult = await manager.discover();
     }
 
-    res.json(await deviceSyncService.syncManager(req.params.managerId));
+    const sync = await deviceSyncService.syncManager(req.params.managerId);
+    await telemetryService?.ingestBatch?.([
+      {
+        eventType: sync.errors?.length ? 'discovery_failed' : 'discovery_completed',
+        managerId: req.params.managerId,
+        payload: { managerId: req.params.managerId, discoverResult, sync },
+      },
+    ]);
+
+    res.json(sync);
   });
 
   router.post('/:managerId/clear-storage', async (req, res) => {
@@ -73,6 +91,18 @@ function createManagersRouter({ managerService, deviceRegistry, deviceSyncServic
     if (typeof manager.clearStorage === 'function') {
       clearResult = await manager.clearStorage();
     }
+
+    await telemetryService?.ingestBatch?.([
+      {
+        eventType: 'storage_cleared',
+        managerId: req.params.managerId,
+        payload: {
+          managerId: req.params.managerId,
+          clearedDeviceCount: existingDevices.length,
+          clearResult,
+        },
+      },
+    ]);
 
     res.json({
       ok: true,

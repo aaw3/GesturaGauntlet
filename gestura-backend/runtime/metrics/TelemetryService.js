@@ -2,9 +2,9 @@ const { randomUUID } = require('crypto');
 const { clone } = require('../utils');
 
 class TelemetryService {
-  constructor({ persistence, grafanaSink, maxBuffered = 1000 } = {}) {
+  constructor({ persistence, telemetrySink, maxBuffered = 1000 } = {}) {
     this.persistence = persistence;
-    this.grafanaSink = grafanaSink;
+    this.telemetrySink = telemetrySink;
     this.maxBuffered = maxBuffered;
     this.events = [];
   }
@@ -32,10 +32,10 @@ class TelemetryService {
     }
 
     try {
-      await this.grafanaSink?.publishBatch?.(normalized);
+      await this.telemetrySink?.publishBatch?.(normalized);
     } catch (err) {
-      if (this.grafanaSink) this.grafanaSink.lastError = err.message;
-      console.error(`[Grafana] Telemetry upload failed: ${err.message}`);
+      if (this.telemetrySink) this.telemetrySink.lastError = err.message;
+      console.error(`[Telemetry] External telemetry upload failed: ${err.message}`);
     }
 
     return { ok: true, accepted: normalized.length };

@@ -48,7 +48,7 @@ export interface SystemStatus {
     configured: boolean;
     connected: boolean;
   };
-  grafana: {
+  influxdb: {
     enabled: boolean;
     status: string;
     lastError?: string | null;
@@ -58,6 +58,7 @@ export interface SystemStatus {
     online: boolean;
     connectedNodeCount: number;
     connectedDashboardCount: number;
+    connectedGloveCount?: number;
   };
   inventory: {
     nodeCount: number;

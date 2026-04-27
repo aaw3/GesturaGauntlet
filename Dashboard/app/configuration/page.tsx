@@ -406,9 +406,9 @@ export default function ConfigurationPage() {
               online={systemStatus?.database.connected === true || systemStatus?.database.configured === false}
             />
             <StatusTile
-              label="Grafana sink"
-              value={systemStatus?.grafana.enabled ? systemStatus.grafana.status : "disabled"}
-              online={systemStatus?.grafana.enabled ? !systemStatus.grafana.lastError : true}
+              label="InfluxDB sink"
+              value={systemStatus?.influxdb.enabled ? systemStatus.influxdb.status : "disabled"}
+              online={systemStatus?.influxdb.enabled ? !systemStatus.influxdb.lastError : true}
             />
           </div>
 

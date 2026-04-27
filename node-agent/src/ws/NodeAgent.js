@@ -88,10 +88,19 @@ class NodeAgent {
     this.managerAttachmentServer.start();
 
     this.heartbeatInterval = setInterval(() => {
+      const devices = this.cache.getAllDevices?.() || [];
       const event = {
         eventType: 'node_heartbeat',
         nodeId: this.node.id,
-        payload: { online: true, managerCount: this.managers.size },
+        payload: {
+          online: true,
+          managerCount: this.managers.size,
+          managers_connected_count: this.managers.size,
+          connected_devices_count: devices.length,
+          devices_online: devices.filter((device) => device.online !== 'offline').length,
+          devices_offline: devices.filter((device) => device.online === 'offline').length,
+          edge_node_uptime_sec: Math.round(process.uptime()),
+        },
       };
       this.telemetry.record(event);
       this.socket?.emit('node:heartbeat', { nodeId: this.node.id, ts: Date.now() });
@@ -159,12 +168,29 @@ class NodeAgent {
 
     try {
       const startedAt = Date.now();
+      if (method === 'discover') {
+        this.telemetry.record({
+          eventType: 'discovery_started',
+          managerId: payload.managerId,
+          payload: { managerId: payload.managerId, nodeId: this.node.id },
+        });
+      }
       const data = await manager[method](argument);
       if (method === 'discover') {
         const refreshedDevices = await manager.listDevices();
         await this.updateManagerInventory(payload.managerId, refreshedDevices);
+        this.telemetry.record({
+          eventType: 'discovery_completed',
+          managerId: payload.managerId,
+          payload: { managerId: payload.managerId, nodeId: this.node.id, deviceCount: refreshedDevices.length },
+        });
       } else if (method === 'clearStorage') {
         await this.updateManagerInventory(payload.managerId, [], { clear: true });
+        this.telemetry.record({
+          eventType: 'storage_cleared',
+          managerId: payload.managerId,
+          payload: { managerId: payload.managerId, nodeId: this.node.id },
+        });
       }
       if (method === 'executeAction') {
         this.telemetry.record({
@@ -183,6 +209,13 @@ class NodeAgent {
       }
       ack?.({ ok: true, data });
     } catch (err) {
+      if (method === 'discover') {
+        this.telemetry.record({
+          eventType: 'discovery_failed',
+          managerId: payload.managerId,
+          payload: { managerId: payload.managerId, nodeId: this.node.id, failure_reason: err.message },
+        });
+      }
       if (method === 'executeAction') {
         this.telemetry.record({
           eventType: 'route_attempt',
