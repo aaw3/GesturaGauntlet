@@ -1,0 +1,14 @@
+{
+  "name": "gestura-kasa-manager",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "socket.io-client": "^4.8.3",
+    "tplink-smarthome-api": "^5.0.0"
+  }
+}

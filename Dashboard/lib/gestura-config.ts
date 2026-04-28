@@ -1,14 +1,5 @@
 export type CapabilityType = "toggle" | "range" | "color" | "discrete";
 
-export type DeviceKind =
-  | "kasa-bulb"
-  | "kasa-plug"
-  | "sim-light"
-  | "sim-fan"
-  | "sim-thermostat"
-  | "scene"
-  | "other";
-
 export interface DeviceCapability {
   id: string;
   label: string;
@@ -57,7 +48,7 @@ export interface SystemStatus {
     configured: boolean;
     connected: boolean;
   };
-  grafana: {
+  influxdb: {
     enabled: boolean;
     status: string;
     lastError?: string | null;
@@ -67,6 +58,7 @@ export interface SystemStatus {
     online: boolean;
     connectedNodeCount: number;
     connectedDashboardCount: number;
+    connectedGloveCount?: number;
   };
   inventory: {
     nodeCount: number;
@@ -92,10 +84,9 @@ export interface DeviceProvenance {
 export interface DeviceDefinition {
   id: string;
   managerId: string;
-  source: "kasa" | "simulator" | "custom";
-  integrationType: "native" | "external" | "node";
   name: string;
-  kind: DeviceKind;
+  type: string;
+  online: "online" | "offline" | "unknown";
   capabilities: DeviceCapability[];
   provenance?: DeviceProvenance;
   managerInterfaces?: ManagerInterface[];
@@ -136,8 +127,8 @@ export interface BackendCapability {
 export interface BackendManagedDevice {
   id: string;
   managerId: string;
-  source: "kasa" | "simulator" | "custom";
-  type: "light" | "plug" | "fan" | "thermostat" | "scene" | "other";
+  source?: string;
+  type: string;
   name: string;
   online: "online" | "offline" | "unknown";
   capabilities: BackendCapability[];
@@ -186,6 +177,14 @@ export interface GloveMappingContract {
   };
 }
 
+export interface GloveWifiNetwork {
+  id: string;
+  gloveId: string;
+  ssid: string;
+  password?: string;
+  updatedAt?: string;
+}
+
 export const sourceInputs = [
   "top_double_tap",
   "bottom_double_tap",
@@ -196,43 +195,6 @@ export const sourceInputs = [
   "glove.pitch",
 ] as const;
 
-export const deviceKinds: { id: DeviceKind; label: string }[] = [
-  { id: "kasa-bulb", label: "Kasa bulb" },
-  { id: "kasa-plug", label: "Kasa plug" },
-  { id: "sim-light", label: "Simulator light" },
-  { id: "sim-fan", label: "Simulator fan" },
-  { id: "sim-thermostat", label: "Simulator thermostat" },
-  { id: "scene", label: "Scene" },
-  { id: "other", label: "Other" },
-];
-
-export const capabilityLibrary: DeviceCapability[] = [
-  { id: "power", label: "Power", type: "toggle", options: ["off", "on"] },
-  { id: "brightness", label: "Brightness", type: "range", min: 0, max: 100, step: 5 },
-  { id: "hue", label: "Hue", type: "range", min: 0, max: 360, step: 5 },
-  { id: "saturation", label: "Saturation", type: "range", min: 0, max: 100, step: 5 },
-  { id: "color_temp", label: "Color temperature", type: "range", min: 2500, max: 6500, step: 100 },
-  { id: "speed", label: "Speed", type: "range", min: 0, max: 3, step: 1 },
-  { id: "temperature", label: "Temperature", type: "range", min: 60, max: 85, step: 1 },
-  { id: "scene", label: "Scene", type: "discrete", options: ["focus", "break", "alert"] },
-];
-
-export const defaultDevices: DeviceDefinition[] = [];
-
-export const defaultMapping: ActionMapping = {
-  source: "glove.roll",
-  mode: "continuous_absolute",
-  targetDevice: "desk_lamp",
-  targetAction: "brightness",
-  min: 0,
-  max: 100,
-  deadzone: 0.12,
-  step: 5,
-  invert: false,
-  offset: 0,
-  smoothing: 0.25,
-};
-
 export function mapBackendDeviceToDefinition(
   device: BackendManagedDevice,
   manager?: DeviceManagerInfo,
@@ -240,10 +202,9 @@ export function mapBackendDeviceToDefinition(
   return {
     id: device.id,
     managerId: device.managerId,
-    source: device.source,
-    integrationType: manager?.integrationType ?? (device.source === "kasa" ? "native" : "external"),
     name: device.name,
-    kind: mapDeviceKind(device),
+    type: device.type || manager?.kind || "device",
+    online: device.online || "unknown",
     capabilities: device.capabilities.map(mapBackendCapability),
     provenance: device.provenance,
     managerInterfaces: device.managerInterfaces,
@@ -264,12 +225,18 @@ function mapBackendCapability(capability: BackendCapability): DeviceCapability {
   };
 }
 
-function mapDeviceKind(device: BackendManagedDevice): DeviceKind {
-  if (device.source === "kasa" && device.type === "light") return "kasa-bulb";
-  if (device.source === "kasa" && device.type === "plug") return "kasa-plug";
-  if (device.source === "simulator" && device.type === "light") return "sim-light";
-  if (device.source === "simulator" && device.type === "fan") return "sim-fan";
-  if (device.source === "simulator" && device.type === "thermostat") return "sim-thermostat";
-  if (device.type === "scene") return "scene";
-  return "other";
+export function mapGloveMappingContractToActionMapping(mapping: GloveMappingContract): ActionMapping {
+  return {
+    source: mapping.inputSource,
+    mode: mapping.mode,
+    targetDevice: mapping.targetDeviceId,
+    targetAction: mapping.targetCapabilityId,
+    min: mapping.transform.min,
+    max: mapping.transform.max,
+    deadzone: mapping.transform.deadzone,
+    step: mapping.transform.step,
+    invert: mapping.transform.invert,
+    offset: mapping.transform.offset,
+    smoothing: mapping.transform.smoothing,
+  };
 }

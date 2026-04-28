@@ -1,0 +1,11 @@
+.git
+**/node_modules
+**/.next
+**/dist
+**/build
+*.log
+received.jpg
+Pico_Gestura
+hardware_tests
+*.pyc
+__pycache__

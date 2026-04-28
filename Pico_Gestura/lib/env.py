@@ -1,5 +1,3 @@
-import os
-
 def load_env(filename=".env"):
     """
     Reads a .env file and loads variables into a dictionary.
@@ -24,14 +22,54 @@ def load_env(filename=".env"):
         print(f"Warning: {filename} file not found.")
     return config
 
-def _parse_mqtt_server(server):
-    # Accept "host" or "host:port"
-    if not server:
-        return "", 1883
-    if ":" in server:
-        host, port_str = server.rsplit(":", 1)
+def parse_ws_url(url):
+    if not url:
+        return {
+            "scheme": "ws",
+            "host": "",
+            "port": 80,
+            "path": "/glove",
+            "secure": False,
+        }
+
+    secure = url.startswith("wss://")
+    scheme = "wss" if secure else "ws"
+    remainder = url.split("://", 1)[1] if "://" in url else url
+    if "/" in remainder:
+        host_part, path = remainder.split("/", 1)
+        path = "/" + path
+    else:
+        host_part = remainder
+        path = "/glove"
+
+    if ":" in host_part:
+        host, port_str = host_part.rsplit(":", 1)
         try:
-            return host, int(port_str)
+            port = int(port_str)
         except ValueError:
-            return server, 1883
-    return server, 1883
+            port = 443 if secure else 80
+    else:
+        host = host_part
+        port = 443 if secure else 80
+
+    return {
+        "scheme": scheme,
+        "host": host,
+        "port": port,
+        "path": path or "/glove",
+        "secure": secure,
+    }
+
+def ws_to_http_url(url):
+    if url.startswith("wss://"):
+        return "https://" + url[len("wss://"):]
+    if url.startswith("ws://"):
+        return "http://" + url[len("ws://"):]
+    return url
+
+def http_to_ws_url(url):
+    if url.startswith("https://"):
+        return "wss://" + url[len("https://"):]
+    if url.startswith("http://"):
+        return "ws://" + url[len("http://"):]
+    return url

@@ -9,6 +9,7 @@ import {
   Cog,
   Fan,
   Hand,
+  HelpCircle,
   Lightbulb,
   ListChecks,
   Play,
@@ -21,20 +22,18 @@ import {
 import {
   ActionMapping,
   BackendManagedDevice,
-  defaultDevices,
-  deviceKinds,
   DeviceCapability,
   DeviceDefinition,
   DeviceManagerInfo,
-  DeviceKind,
   GloveMappingContract,
+  GloveWifiNetwork,
   mapBackendDeviceToDefinition,
+  mapGloveMappingContractToActionMapping,
   MappingMode,
   NodeInfo,
   sourceInputs,
   SystemStatus,
 } from "@/lib/gestura-config";
-import { DEFAULT_BACKEND_URL, fetchBackend } from "@/lib/backend-auth";
 import { getManagerColor, getManagerIcon } from "@/lib/manager-display";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -59,21 +58,26 @@ type DeviceActionResult = {
 };
 
 export default function ConfigurationPage() {
-  const [devices, setDevices] = useState<DeviceDefinition[]>(defaultDevices);
+  const [devices, setDevices] = useState<DeviceDefinition[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [mappings, setMappings] = useState<ActionMapping[]>([]);
   const [centralMappings, setCentralMappings] = useState<GloveMappingContract[]>([]);
   const [managers, setManagers] = useState<DeviceManagerInfo[]>([]);
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
-  const [inventoryTab, setInventoryTab] = useState<"nodes" | "managers" | "devices" | "mappings">("nodes");
-  const [backendUrl, setBackendUrl] = useState(DEFAULT_BACKEND_URL);
+  const [inventoryTab, setInventoryTab] = useState<"nodes" | "managers" | "devices" | "mappings" | "wifi">("nodes");
+  const [wifiNetworks, setWifiNetworks] = useState<GloveWifiNetwork[]>([]);
+  const [wifiSsid, setWifiSsid] = useState("");
+  const [wifiPassword, setWifiPassword] = useState("");
+  const [wifiStatus, setWifiStatus] = useState("");
   const [testCapabilityId, setTestCapabilityId] = useState<string>("");
   const [testValue, setTestValue] = useState<string>("");
   const [testStatus, setTestStatus] = useState("Select a device function to test.");
   const [testingFunction, setTestingFunction] = useState(false);
-  const [isLoadingInventory, setIsLoadingInventory] = useState(false);
-  const [inventoryError, setInventoryError] = useState<string | null>(null);
+  const [managerSort, setManagerSort] = useState<"none" | "asc" | "desc">("none");
+  const [deviceSort, setDeviceSort] = useState<"none" | "asc" | "desc">("asc");
+  const [managerActionStatus, setManagerActionStatus] = useState<Record<string, string>>({});
+  const [managerActionPending, setManagerActionPending] = useState<Record<string, boolean>>({});
 
   const selectedDevice = devices.find((device) => device.id === selectedDeviceId) ?? null;
   const testCapability = useMemo(
@@ -84,16 +88,39 @@ export default function ConfigurationPage() {
     [selectedDevice, testCapabilityId],
   );
   const selectedDeviceMappings = useMemo(
-    () =>
-      selectedDevice?.capabilities.map(
-        (capability) =>
-          mappings.find(
-            (mapping) =>
-              mapping.targetDevice === selectedDevice.id && mapping.targetAction === capability.id,
-          ) ?? createCapabilityMapping(selectedDevice.id, capability),
-      ) ?? [],
+    () => selectedDevice
+      ? mappings.filter((mapping) => mapping.targetDevice === selectedDevice.id)
+      : [],
     [selectedDevice, mappings],
   );
+
+  const sortedDevices = useMemo(() => {
+    const collator = new Intl.Collator(undefined, { sensitivity: "base" });
+    const devicesWithManager = devices.map((device) => ({
+      device,
+      managerName:
+        device.provenance?.managerName ||
+        managers.find((manager) => manager.id === device.managerId)?.metadata?.name ||
+        managers.find((manager) => manager.id === device.managerId)?.name ||
+        device.managerId,
+    }));
+
+    devicesWithManager.sort((left, right) => {
+      if (managerSort !== "none") {
+        const managerCompare = collator.compare(left.managerName, right.managerName);
+        if (managerCompare !== 0) return managerSort === "asc" ? managerCompare : -managerCompare;
+      }
+
+      if (deviceSort !== "none") {
+        const deviceCompare = collator.compare(left.device.name, right.device.name);
+        if (deviceCompare !== 0) return deviceSort === "asc" ? deviceCompare : -deviceCompare;
+      }
+
+      return collator.compare(left.device.id, right.device.id);
+    });
+
+    return devicesWithManager.map(({ device }) => device);
+  }, [deviceSort, devices, managerSort, managers]);
 
   const generatedConfig = useMemo(
     () => selectedDevice ? ({
@@ -117,13 +144,47 @@ export default function ConfigurationPage() {
     );
   };
 
+  const persistDeviceMappings = async (deviceId: string, nextMappings: ActionMapping[]) => {
+    const payload = nextMappings
+      .filter((mapping) => mapping.targetDevice === deviceId)
+      .map(toGloveMappingContract);
+
+    const response = await fetch(`/api/mappings/devices/${encodeURIComponent(deviceId)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to save mappings for ${deviceId}`);
+    }
+
+    const saved = (await response.json()) as GloveMappingContract[];
+    setCentralMappings((current) => [
+      ...current.filter((mapping) => mapping.targetDeviceId !== deviceId),
+      ...saved,
+    ]);
+  };
+
+  const setDeviceMappings = (updater: (current: ActionMapping[]) => ActionMapping[]) => {
+    if (!selectedDevice) return;
+
+    setMappings((current) => {
+      const next = updater(current);
+      void persistDeviceMappings(selectedDevice.id, next).catch((error) => {
+        console.error(error instanceof Error ? error.message : "Failed to save mappings.");
+      });
+      return next;
+    });
+  };
+
   const updateCapabilityMapping = <Key extends keyof ActionMapping>(
     capability: DeviceCapability,
     key: Key,
     value: ActionMapping[Key],
   ) => {
     if (!selectedDevice) return;
-    setMappings((current) => {
+    setDeviceMappings((current) => {
       const next = current.filter(
         (mapping) =>
           !(mapping.targetDevice === selectedDevice.id && mapping.targetAction === capability.id),
@@ -144,25 +205,72 @@ export default function ConfigurationPage() {
     });
   };
 
-  const refreshManagersAndDevices = async () => {
-    setIsLoadingInventory(true);
-    setInventoryError(null);
+  const toggleCapabilityMapping = (capability: DeviceCapability, enabled: boolean) => {
+    if (!selectedDevice) return;
+
+    setDeviceMappings((current) => {
+      const withoutCapability = current.filter(
+        (mapping) =>
+          !(mapping.targetDevice === selectedDevice.id && mapping.targetAction === capability.id),
+      );
+
+      if (!enabled) return withoutCapability;
+
+      return [...withoutCapability, createCapabilityMapping(selectedDevice.id, capability)];
+    });
+  };
+
+  const runManagerAction = async (managerId: string, action: "discover" | "clear-storage") => {
+    setManagerActionPending((current) => ({ ...current, [managerId]: true }));
+    setManagerActionStatus((current) => ({
+      ...current,
+      [managerId]: action === "discover" ? "Restarting discovery..." : "Clearing manager storage...",
+    }));
 
     try {
-      const managerResponse = await fetchBackend(`${backendUrl}/api/managers`);
+      const response = await fetch(`/api/managers/${encodeURIComponent(managerId)}/${action}`, {
+        method: "POST",
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload?.error || `Manager action failed (${response.status})`);
+      }
+
+      await refreshManagersAndDevices();
+      setManagerActionStatus((current) => ({
+        ...current,
+        [managerId]:
+          action === "discover"
+            ? "Discovery finished."
+            : `Storage cleared and rediscovery completed (${payload.sync?.discovered ?? 0} devices).`,
+      }));
+    } catch (error) {
+      setManagerActionStatus((current) => ({
+        ...current,
+        [managerId]: error instanceof Error ? error.message : "Manager action failed.",
+      }));
+    } finally {
+      setManagerActionPending((current) => ({ ...current, [managerId]: false }));
+    }
+  };
+
+  const refreshManagersAndDevices = async () => {
+    try {
+      const managerResponse = await fetch('/api/managers');
       const managerList = managerResponse.ok
-        ? ((await managerResponse.json()) as DeviceManagerInfo[])
-        : [];
+      ? ((await managerResponse.json()) as DeviceManagerInfo[])
+      : [];
       setManagers(managerList);
 
-      const systemResponse = await fetchBackend(`${backendUrl}/api/system/status`);
+      const systemResponse = await fetch('/api/system/status');
       if (systemResponse.ok) setSystemStatus((await systemResponse.json()) as SystemStatus);
 
-      const nodeResponse = await fetchBackend(`${backendUrl}/api/nodes`);
+      const nodeResponse = await fetch('/api/nodes');
       const nodeList = nodeResponse.ok ? ((await nodeResponse.json()) as NodeInfo[]) : [];
       setNodes(nodeList);
 
-      const deviceResponse = await fetchBackend(`${backendUrl}/api/devices`);
+      const deviceResponse = await fetch('/api/devices');
       const backendDevices = deviceResponse.ok
         ? ((await deviceResponse.json()) as BackendManagedDevice[])
         : [];
@@ -178,14 +286,45 @@ export default function ConfigurationPage() {
           ? current
           : mappedDevices[0]?.id ?? null,
       );
-      const mappingResponse = await fetchBackend(`${backendUrl}/api/mappings`);
+      const mappingResponse = await fetch('/api/mappings');
       const mappingList = mappingResponse.ok ? ((await mappingResponse.json()) as GloveMappingContract[]) : [];
       setCentralMappings(mappingList);
+      setMappings(mappingList.map(mapGloveMappingContractToActionMapping));
+
+      const wifiResponse = await fetch('/api/gloves/primary_glove/wifi-networks');
+      if (wifiResponse.ok) setWifiNetworks((await wifiResponse.json()) as GloveWifiNetwork[]);
     } catch (error) {
-      setInventoryError(error instanceof Error ? error.message : "Failed to load device inventory.");
-    } finally {
-      setIsLoadingInventory(false);
+      console.error(error instanceof Error ? error.message : "Failed to load managers.");
     }
+  };
+
+  const saveWifiNetwork = async () => {
+    if (!wifiSsid.trim()) {
+      setWifiStatus("SSID is required.");
+      return;
+    }
+    const response = await fetch('/api/gloves/primary_glove/wifi-networks', {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ssid: wifiSsid.trim(), password: wifiPassword }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      setWifiStatus(payload.error || "Failed to save WiFi network.");
+      return;
+    }
+    setWifiSsid("");
+    setWifiPassword("");
+    setWifiStatus("WiFi network saved. The glove will sync it on next config refresh.");
+    void refreshManagersAndDevices();
+  };
+
+  const deleteWifiNetwork = async (network: GloveWifiNetwork) => {
+    await fetch(`/api/gloves/primary_glove/wifi-networks/${encodeURIComponent(network.id || network.ssid)}`, {
+      method: "DELETE",
+    });
+    setWifiStatus("WiFi network removed.");
+    void refreshManagersAndDevices();
   };
 
   const runTestFunction = async () => {
@@ -195,8 +334,7 @@ export default function ConfigurationPage() {
     setTestStatus(`Running ${selectedDevice.name}.${testCapability.id}.`);
 
     try {
-      const response = await fetchBackend(
-        `${backendUrl}/api/devices/${encodeURIComponent(selectedDevice.id)}/actions/${encodeURIComponent(testCapability.id)}`,
+      const response = await fetch(`/api/devices/${encodeURIComponent(selectedDevice.id)}/actions/${encodeURIComponent(testCapability.id)}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -244,7 +382,7 @@ export default function ConfigurationPage() {
   useEffect(() => {
     const interval = setInterval(() => void refreshManagersAndDevices(), 60_000);
     return () => clearInterval(interval);
-  }, [backendUrl]);
+  }, []);
 
   return (
     <main className="min-h-screen bg-background">
@@ -279,28 +417,14 @@ export default function ConfigurationPage() {
             <div>
               <h2 className="font-semibold">Control Plane</h2>
               <p className="text-sm text-muted-foreground">
-                Local backend, dashboard websocket, and configured Kasa inventory status.
+                Central API, websocket hub, database, and metrics sink status.
               </p>
             </div>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-              <Input
-                value={backendUrl}
-                onChange={(event) => setBackendUrl(event.target.value)}
-                className="w-full font-mono text-xs sm:w-56"
-                aria-label="Backend URL"
-              />
-              <Button size="sm" variant="outline" onClick={() => void refreshManagersAndDevices()}>
-                <RefreshCw className="size-4" />
-                {isLoadingInventory ? "Refreshing" : "Refresh"}
-              </Button>
-            </div>
+            <Button size="sm" variant="outline" onClick={() => void refreshManagersAndDevices()}>
+              <RefreshCw className="size-4" />
+              Refresh
+            </Button>
           </div>
-
-          {inventoryError && (
-            <div className="mb-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-              {inventoryError}
-            </div>
-          )}
 
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <StatusTile
@@ -319,9 +443,9 @@ export default function ConfigurationPage() {
               online={systemStatus?.database.connected === true || systemStatus?.database.configured === false}
             />
             <StatusTile
-              label="Grafana sink"
-              value={systemStatus?.grafana.enabled ? systemStatus.grafana.status : "disabled"}
-              online={systemStatus?.grafana.enabled ? !systemStatus.grafana.lastError : true}
+              label="InfluxDB sink"
+              value={systemStatus?.influxdb.enabled ? systemStatus.influxdb.status : "disabled"}
+              online={systemStatus?.influxdb.enabled ? !systemStatus.influxdb.lastError : true}
             />
           </div>
 
@@ -338,11 +462,11 @@ export default function ConfigurationPage() {
             <div>
               <h2 className="font-semibold">Node Inventory</h2>
               <p className="text-sm text-muted-foreground">
-                This view adapts the current fixed-IP Kasa backend into Allen&apos;s manager/device model.
+                Nodes are real node-agent websocket registrations; central is not shown as a node.
               </p>
             </div>
-            <div className="grid grid-cols-4 gap-1 rounded-md border border-border bg-background p-1">
-              {(["nodes", "managers", "devices", "mappings"] as const).map((tab) => (
+            <div className="grid grid-cols-5 gap-1 rounded-md border border-border bg-background p-1">
+              {(["nodes", "managers", "devices", "mappings", "wifi"] as const).map((tab) => (
                 <Button
                   key={tab}
                   size="sm"
@@ -403,6 +527,31 @@ export default function ConfigurationPage() {
                         <p className="mt-1 truncate text-xs text-muted-foreground">
                           {formatInterfaces(manager.interfaces)}
                         </p>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={managerActionPending[manager.id]}
+                            onClick={() => void runManagerAction(manager.id, "discover")}
+                          >
+                            <RefreshCw className="size-4" />
+                            Discover devices
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={managerActionPending[manager.id]}
+                            onClick={() => void runManagerAction(manager.id, "clear-storage")}
+                          >
+                            <RefreshCw className="size-4" />
+                            Clear manager storage
+                          </Button>
+                        </div>
+                        {managerActionStatus[manager.id] && (
+                          <p className="mt-2 text-xs text-muted-foreground">
+                            {managerActionStatus[manager.id]}
+                          </p>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -413,11 +562,37 @@ export default function ConfigurationPage() {
           )}
 
           {inventoryTab === "devices" && (
-            <div className="grid gap-2">
-              {devices.map((device) => {
+            <div className="grid gap-3">
+              <div className="grid gap-3 rounded-md border border-border bg-background p-3 md:grid-cols-2">
+                <Field label="Sort by manager">
+                  <Select value={managerSort} onValueChange={(value) => setManagerSort(value as "none" | "asc" | "desc")}>
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">No manager sort</SelectItem>
+                      <SelectItem value="asc">Manager A-Z</SelectItem>
+                      <SelectItem value="desc">Manager Z-A</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Sort by device">
+                  <Select value={deviceSort} onValueChange={(value) => setDeviceSort(value as "none" | "asc" | "desc")}>
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">No device sort</SelectItem>
+                      <SelectItem value="asc">Device A-Z</SelectItem>
+                      <SelectItem value="desc">Device Z-A</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </div>
+              {sortedDevices.map((device) => {
                 const Icon = getManagerIcon(device.provenance?.managerIconKey);
                 return (
-                  <div key={device.id} className="grid gap-3 rounded-md border border-border bg-background p-3 md:grid-cols-[1fr_220px_220px_120px] md:items-center">
+                  <div key={device.id} className="grid gap-3 rounded-md border border-border bg-background p-3 md:grid-cols-[1fr_180px_220px_220px_120px] md:items-center">
                     <div className="flex min-w-0 items-center gap-3">
                       <div className={`flex size-10 shrink-0 items-center justify-center rounded-md border ${getManagerColor(device.provenance?.managerColorKey)}`}>
                         <Icon className="size-5" />
@@ -427,6 +602,7 @@ export default function ConfigurationPage() {
                         <div className="truncate font-mono text-xs text-muted-foreground">{device.id}</div>
                       </div>
                     </div>
+                    <InfoRow label="Status" value={formatOnlineState(device.online)} />
                     <InfoRow label="Manager" value={device.provenance?.managerName ?? device.managerId} />
                     <InfoRow label="Node" value={device.provenance?.nodeName ?? device.provenance?.nodeId ?? "unknown"} />
                     <InfoRow label="Route" value={formatInterfaces(device.managerInterfaces)} />
@@ -450,6 +626,40 @@ export default function ConfigurationPage() {
               {centralMappings.length === 0 && <EmptyInventory label="No central mappings saved." />}
             </div>
           )}
+
+          {inventoryTab === "wifi" && (
+            <div className="grid gap-4">
+              <div className="grid gap-3 rounded-md border border-border bg-background p-4 md:grid-cols-[1fr_1fr_auto] md:items-end">
+                <Field label="SSID">
+                  <Input value={wifiSsid} onChange={(event) => setWifiSsid(event.target.value)} />
+                </Field>
+                <Field label="Password">
+                  <Input
+                    type="password"
+                    value={wifiPassword}
+                    onChange={(event) => setWifiPassword(event.target.value)}
+                  />
+                </Field>
+                <Button onClick={() => void saveWifiNetwork()}>
+                  <Check className="size-4" />
+                  Save network
+                </Button>
+              </div>
+              {wifiStatus && <p className="text-sm text-muted-foreground">{wifiStatus}</p>}
+              <div className="grid gap-2">
+                {wifiNetworks.map((network) => (
+                  <div key={network.id || network.ssid} className="grid gap-2 rounded-md border border-border bg-background p-3 md:grid-cols-[1fr_160px_auto] md:items-center">
+                    <InfoRow label="SSID" value={network.ssid} />
+                    <InfoRow label="Updated" value={formatTimestamp(network.updatedAt)} />
+                    <Button size="sm" variant="outline" onClick={() => void deleteWifiNetwork(network)}>
+                      Remove
+                    </Button>
+                  </div>
+                ))}
+                {wifiNetworks.length === 0 && <EmptyInventory label="No WiFi networks configured." />}
+              </div>
+            </div>
+          )}
         </section>
 
         <section className="grid gap-4 lg:grid-cols-[360px_1fr]">
@@ -462,35 +672,62 @@ export default function ConfigurationPage() {
               <Badge variant="outline">{devices.length}</Badge>
             </div>
 
+            <div className="mb-4 grid gap-3 sm:grid-cols-2">
+              <Field label="Manager sort">
+                <Select value={managerSort} onValueChange={(value) => setManagerSort(value as "none" | "asc" | "desc")}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No manager sort</SelectItem>
+                    <SelectItem value="asc">Manager A-Z</SelectItem>
+                    <SelectItem value="desc">Manager Z-A</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="Device sort">
+                <Select value={deviceSort} onValueChange={(value) => setDeviceSort(value as "none" | "asc" | "desc")}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No device sort</SelectItem>
+                    <SelectItem value="asc">Device A-Z</SelectItem>
+                    <SelectItem value="desc">Device Z-A</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+            </div>
+
             <div className="space-y-2">
               {devices.length === 0 && (
                 <div className="rounded-md border border-dashed border-border bg-background p-4 text-sm text-muted-foreground">
-                  No configured Kasa devices found. Set PLUG_IP, BULB_IP, or BULB_IPS in the backend environment.
+                  No devices imported yet. Start a node-agent and attach a manager over websocket.
                 </div>
               )}
-              {devices.map((device) => (
+              {sortedDevices.map((device) => (
                 <button
                   key={device.id}
                   onClick={() => setSelectedDeviceId(device.id)}
-                  className={`relative flex w-full items-center gap-3 overflow-hidden rounded-md border p-3 pl-4 text-left transition ${
+                  className={`relative flex w-full items-center gap-3 overflow-hidden rounded-md border p-3 pt-5 pl-4 text-left transition ${
                     selectedDeviceId === device.id
                       ? "border-primary bg-primary/10"
                       : "border-border bg-background hover:border-primary/50"
                   }`}
                 >
                   <span
-                    className={`absolute left-2 top-0 rounded-b px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-background ${managerColorClass(device.managerId)}`}
+                    className={`absolute left-2 top-0 rounded-b px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-background ${managerColorClass(device.provenance?.managerColorKey)}`}
                   >
-                    {device.managerId}
+                    {device.provenance?.managerName ?? device.managerId}
                   </span>
                   <span
-                    className={`absolute left-0 top-0 h-full w-1 ${managerColorClass(device.managerId)}`}
+                    className={`absolute left-0 top-0 h-full w-1 ${managerColorClass(device.provenance?.managerColorKey)}`}
                   />
-                  <DeviceIcon kind={device.kind} />
+                  <DeviceIcon type={device.type} />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium">{device.name}</div>
                     <div className="truncate text-xs text-muted-foreground">
-                      {device.id} · imported via {device.managerId}
+                      {device.id} · {formatOnlineState(device.online)} · imported via {device.managerId}
                     </div>
                   </div>
                   {selectedDeviceId === device.id && <Check className="size-4 text-primary" />}
@@ -517,22 +754,8 @@ export default function ConfigurationPage() {
                     onChange={(event) => updateSelectedDevice({ name: event.target.value })}
                   />
                 </Field>
-                <Field label="Icon/type">
-                  <Select
-                    value={selectedDevice.kind}
-                    onValueChange={(value) => updateSelectedDevice({ kind: value as DeviceKind })}
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {deviceKinds.map((kind) => (
-                        <SelectItem key={kind.id} value={kind.id}>
-                          {kind.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                <Field label="Device type">
+                  <Input value={selectedDevice.type} disabled />
                 </Field>
                 <Field label="Supported actions">
                   <div className="text-sm text-muted-foreground">
@@ -542,9 +765,9 @@ export default function ConfigurationPage() {
               </div>
 
               <div className="mt-5 grid gap-3 sm:grid-cols-3">
-                <InfoPill label="Manager" value={selectedDevice.managerId} tone={selectedDevice.managerId} />
-                <InfoPill label="Source" value={selectedDevice.source} />
-                <InfoPill label="Integration" value={selectedDevice.integrationType} />
+                <InfoPill label="Manager" value={selectedDevice.provenance?.managerName ?? selectedDevice.managerId} tone={selectedDevice.provenance?.managerColorKey} />
+                <InfoPill label="Node" value={selectedDevice.provenance?.nodeName ?? selectedDevice.provenance?.nodeId ?? "unknown"} />
+                <InfoPill label="Status" value={formatOnlineState(selectedDevice.online)} />
               </div>
 
               <div className="mt-6 grid gap-2">
@@ -562,7 +785,17 @@ export default function ConfigurationPage() {
                           : ""}
                       </div>
                     </div>
-                    <Badge variant="default">Supported</Badge>
+                    <Badge
+                      variant={
+                        selectedDeviceMappings.some((mapping) => mapping.targetAction === capability.id)
+                          ? "default"
+                          : "outline"
+                      }
+                    >
+                      {selectedDeviceMappings.some((mapping) => mapping.targetAction === capability.id)
+                        ? "Enabled"
+                        : "Disabled"}
+                    </Badge>
                   </div>
                 ))}
               </div>
@@ -580,19 +813,20 @@ export default function ConfigurationPage() {
 
                 <div className="grid gap-4">
                   {selectedDevice.capabilities.map((capability) => {
-                    const capabilityMapping =
-                      mappings.find(
-                        (item) =>
-                          item.targetDevice === selectedDevice.id &&
-                          item.targetAction === capability.id,
-                      ) ?? createCapabilityMapping(selectedDevice.id, capability);
+                    const capabilityMapping = mappings.find(
+                      (item) =>
+                        item.targetDevice === selectedDevice.id &&
+                        item.targetAction === capability.id,
+                    );
 
                     return (
                       <FunctionMappingCard
                         key={capability.id}
                         capability={capability}
                         deviceId={selectedDevice.id}
-                        mapping={capabilityMapping}
+                        mapping={capabilityMapping ?? createCapabilityMapping(selectedDevice.id, capability)}
+                        enabled={Boolean(capabilityMapping)}
+                        onToggleEnabled={(enabled) => toggleCapabilityMapping(capability, enabled)}
                         onUpdate={(key, value) => updateCapabilityMapping(capability, key, value)}
                       />
                     );
@@ -657,6 +891,9 @@ export default function ConfigurationPage() {
                   </div>
                 );
               })}
+              {selectedDeviceMappings.length === 0 && (
+                <EmptyInventory label="No function mappings enabled for this device." />
+              )}
             </div>
           </div>
 
@@ -680,11 +917,15 @@ function FunctionMappingCard({
   capability,
   deviceId,
   mapping,
+  enabled,
+  onToggleEnabled,
   onUpdate,
 }: {
   capability: DeviceCapability;
   deviceId: string;
   mapping: ActionMapping;
+  enabled: boolean;
+  onToggleEnabled: (enabled: boolean) => void;
   onUpdate: <Key extends keyof ActionMapping>(key: Key, value: ActionMapping[Key]) => void;
 }) {
   const modeOptions = mappingModesForCapability(capability);
@@ -703,12 +944,28 @@ function FunctionMappingCard({
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Badge>{mapping.mode}</Badge>
+          <Badge variant={enabled ? "default" : "outline"}>{enabled ? mapping.mode : "disabled"}</Badge>
           <span className="text-xs text-muted-foreground group-open:hidden">Expand</span>
           <span className="hidden text-xs text-muted-foreground group-open:inline">Collapse</span>
         </div>
       </summary>
 
+      <div className="mt-4 flex items-center justify-between rounded-md border border-border bg-card p-3">
+        <div>
+          <Label htmlFor={`${deviceId}-${capability.id}-enabled`}>Use this event type</Label>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Turning it off removes the saved function mapping for this device capability.
+          </p>
+        </div>
+        <Switch
+          id={`${deviceId}-${capability.id}-enabled`}
+          checked={enabled}
+          onCheckedChange={onToggleEnabled}
+        />
+      </div>
+
+      {!enabled ? null : (
+        <>
       <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Field label={`${capability.id} source`}>
           <Select value={mapping.source} onValueChange={(value) => onUpdate("source", value)}>
@@ -768,6 +1025,8 @@ function FunctionMappingCard({
       <pre className="mt-4 max-h-52 overflow-auto rounded-md bg-secondary p-3 text-xs leading-relaxed text-secondary-foreground">
         {JSON.stringify(mapping, null, 2)}
       </pre>
+        </>
+      )}
     </details>
   );
 }
@@ -1026,6 +1285,12 @@ function formatInterfaces(interfaces?: { kind: string; url: string }[]) {
   return interfaces.map((item) => `${item.kind}: ${item.url}`).join(", ");
 }
 
+function formatOnlineState(online: DeviceDefinition["online"]) {
+  if (online === "online") return "Online";
+  if (online === "offline") return "Offline";
+  return "Unknown";
+}
+
 function Field({ label, children }: { label: string; children: ReactNode }) {
   const id = label.toLowerCase().replaceAll(" ", "-");
 
@@ -1060,9 +1325,13 @@ function NumberField({
   );
 }
 
-function DeviceIcon({ kind }: { kind: DeviceKind }) {
-  const Icon =
-    kind === "kasa-bulb" || kind === "sim-light" ? Lightbulb : kind === "sim-fan" ? Fan : Plug;
+function DeviceIcon({ type }: { type: string }) {
+  const normalizedType = String(type || "").toLowerCase();
+  let Icon = HelpCircle;
+
+  if (normalizedType.includes("light") || normalizedType.includes("bulb")) Icon = Lightbulb;
+  else if (normalizedType.includes("fan")) Icon = Fan;
+  else if (normalizedType.includes("plug")) Icon = Plug;
 
   return (
     <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-secondary text-primary">
@@ -1095,8 +1364,10 @@ function StatusTile({ label, value, online }: { label: string; value: string; on
   );
 }
 
-function managerColorClass(managerId: string) {
-  if (managerId.includes("kasa")) return "bg-primary";
-  if (managerId.includes("sim")) return "bg-chart-2";
-  return "bg-chart-4";
+function managerColorClass(colorKey?: string) {
+  if (colorKey === "amber") return "bg-amber-500";
+  if (colorKey === "cyan") return "bg-cyan-500";
+  if (colorKey === "emerald") return "bg-emerald-500";
+  if (colorKey === "rose") return "bg-rose-500";
+  return "bg-slate-500";
 }

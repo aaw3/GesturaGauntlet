@@ -9,7 +9,7 @@ class GauntletButton:
         # We use PULL_UP, meaning the pin reads 1 normally, and 0 when pressed.
         self.button = machine.Pin(pin_num, machine.Pin.IN, machine.Pin.PULL_UP)
 
-    async def monitor(self, gui, mqtt_client, store):
+    async def monitor(self, gui, store):
         print(f"--- Button Monitor Started ({self.name} on GP{self.pin_num}) ---")
         
         last_release_time = 0
@@ -44,11 +44,16 @@ class GauntletButton:
                             gui.update_state(mode=new_mode)
                             print(f"Mode toggled via button to: {new_mode}")
                             
-                            if mqtt_client:
+                            transport_client = store.get("transport")
+                            if transport_client:
                                 try:
-                                    mqtt_client.publish(b"gauntlet/mode", new_mode.encode())
+                                    transport_client.send_json({
+                                        "type": "mode_set",
+                                        "mode": new_mode.lower(),
+                                        "button": self.name.lower().replace(" ", "_"),
+                                    })
                                 except Exception as e:
-                                    print(f"Failed to publish mode change: {e}")
+                                    print(f"Failed to send mode change: {e}")
                         
                         # Reset last_release_time to prevent triple-tap being two double-taps
                         last_release_time = 0
@@ -65,11 +70,23 @@ class GauntletButton:
                             if self.pin_num == 13:
                                 print(">>> ACTION BUTTON SHORT PRESS <<<")
                                 gui.update_state(action="ACTION SENT")
-                                if mqtt_client:
+                                if store.get("mode") == "ACTIVE":
+                                    store.enqueue_input(
+                                        "bottom_tap",
+                                        1,
+                                        button=self.name.lower().replace(" ", "_"),
+                                        duration_ms=duration,
+                                    )
+                                transport_client = store.get("transport")
+                                if transport_client and store.get("mode") != "ACTIVE":
                                     try:
-                                        mqtt_client.publish(b"gauntlet/action", b"single_press")
-                                    except:
-                                        pass
+                                        transport_client.send_json({
+                                            "type": "button_action",
+                                            "action": "single_press",
+                                            "button": self.name.lower().replace(" ", "_"),
+                                        })
+                                    except Exception as e:
+                                        print(f"Failed to send button action: {e}")
                         
                         last_release_time = release_time
                             

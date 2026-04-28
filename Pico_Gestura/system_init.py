@@ -9,7 +9,7 @@ def hardware_check():
     devices = i2c.scan()
     
     if not devices:
-        raise Exception("No I2C devices found! Check MPU wiring on GP4/GP5.")
+        raise Exception("No I2C devices found! Check OLED wiring.")
         
     print(f"I2C devices found at: {[hex(d) for d in devices]}")
     return i2c, devices
