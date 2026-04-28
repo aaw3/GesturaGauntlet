@@ -345,6 +345,14 @@ class PostgresStore {
               enabled, payload, updated_at
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())
+            ON CONFLICT (id) DO UPDATE SET
+              glove_id = EXCLUDED.glove_id,
+              input_source = EXCLUDED.input_source,
+              target_device_id = EXCLUDED.target_device_id,
+              target_capability_id = EXCLUDED.target_capability_id,
+              enabled = EXCLUDED.enabled,
+              payload = EXCLUDED.payload,
+              updated_at = now()
           `,
           [
             mapping.id,
