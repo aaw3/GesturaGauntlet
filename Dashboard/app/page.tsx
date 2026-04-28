@@ -364,39 +364,7 @@ export default function Dashboard() {
   );
 }
 
-function normalizeSensorData(data: Partial<SensorData>): SensorData {
-  return {
-    roll: Number(data.roll ?? data.x ?? 0),
-    pitch: Number(data.pitch ?? data.y ?? 0),
-    roll_deg: Number(data.roll_deg ?? 0),
-    pitch_deg: Number(data.pitch_deg ?? 0),
-    x: Number(data.x ?? 0),
-    y: Number(data.y ?? 0),
-    z: Number(data.z ?? 0),
-    gx: Number(data.gx ?? 0),
-    gy: Number(data.gy ?? 0),
-    gz: Number(data.gz ?? 0),
-    pressure: Number(data.pressure ?? 0),
-  };
-}
 
-function InfoRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-4 border-t border-border/60 pt-3 text-sm">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="truncate text-right font-mono text-xs text-foreground">{value}</span>
-    </div>
-  );
-}
-
-function InfoTile({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md border border-border bg-background p-4">
-      <div className="text-xs font-medium uppercase text-muted-foreground">{label}</div>
-      <div className="mt-2 truncate font-mono text-lg font-semibold">{value}</div>
-    </div>
-  );
-}
 
 function MetricTile({
   label,
@@ -423,6 +391,78 @@ function MetricTile({
         <Icon className={`size-4 ${toneClass}`} />
       </div>
       <div className="truncate text-xl font-semibold tracking-tight">{value}</div>
+    </div>
+  );
+}
+
+function resolveBackendSocketUrl() {
+  if (process.env.NEXT_PUBLIC_GESTURA_BACKEND_URL) {
+    return process.env.NEXT_PUBLIC_GESTURA_BACKEND_URL;
+  }
+
+  if (typeof window === "undefined") return undefined;
+
+  if (window.location.port === "3000" || window.location.port === "3100") {
+    return `${window.location.protocol}//${window.location.hostname}:3001`;
+  }
+
+  return undefined;
+}
+
+function normalizeSensorData(data: Partial<SensorData>): SensorData {
+  return {
+    roll: Number(data.roll ?? data.x ?? 0),
+    pitch: Number(data.pitch ?? data.y ?? 0),
+    roll_deg: Number(data.roll_deg ?? 0),
+    pitch_deg: Number(data.pitch_deg ?? 0),
+    x: Number(data.x ?? 0),
+    y: Number(data.y ?? 0),
+    z: Number(data.z ?? 0),
+    gx: Number(data.gx ?? 0),
+    gy: Number(data.gy ?? 0),
+    gz: Number(data.gz ?? 0),
+    pressure: Number(data.pressure ?? 0),
+  };
+}
+
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-4 text-sm">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="truncate text-right font-mono text-xs text-foreground">{value}</span>
+    </div>
+  );
+}
+
+function InfoTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border border-border bg-gradient-to-br from-card to-card/80 p-5 ring-1 ring-primary/5">
+      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="mt-2 truncate font-mono text-xl font-bold text-foreground">{value}</div>
+    </div>
+  );
+}
+
+function RuntimeCard({
+  title,
+  icon: Icon,
+  rows,
+}: {
+  title: string;
+  icon: ElementType;
+  rows: Array<[string, string]>;
+}) {
+  return (
+    <div className="rounded-xl border border-border bg-gradient-to-br from-card to-card/80 p-6 ring-1 ring-primary/5">
+      <div className="mb-4 flex items-center gap-2">
+        <Icon className="h-5 w-5 text-primary" />
+        <h2 className="font-semibold text-card-foreground">{title}</h2>
+      </div>
+      <div className="space-y-3">
+        {rows.map(([label, value]) => (
+          <InfoRow key={label} label={label} value={value} />
+        ))}
+      </div>
     </div>
   );
 }
