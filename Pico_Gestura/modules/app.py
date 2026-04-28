@@ -29,7 +29,8 @@ class RuntimeApp:
         self.ws_heartbeat_ms = int(env.get("WS_HEARTBEAT_MS", "20000"))
         self.ws_first_heartbeat_delay_ms = int(env.get("WS_FIRST_HEARTBEAT_DELAY_MS", "30000"))
         self.ws_offline_timeout_ms = int(env.get("WS_OFFLINE_TIMEOUT_MS", "90000"))
-        self.ws_action_fresh_ms = int(env.get("WS_ACTION_FRESH_MS", "15000"))
+        self.ws_action_fresh_ms = int(env.get("WS_ACTION_FRESH_MS", "60000"))
+        self.ws_force_fresh_action_socket = env_bool(env.get("WS_FORCE_FRESH_ACTION_SOCKET", "false"))
         self.ws_action_response_timeout_ms = int(env.get("WS_ACTION_RESPONSE_TIMEOUT_MS", "1500"))
         self.ws_send_cooldown_ms = int(env.get("WS_SEND_COOLDOWN_MS", "1500"))
         self.ws_failed_send_cooldown_ms = int(env.get("WS_FAILED_SEND_COOLDOWN_MS", "5000"))
@@ -447,6 +448,9 @@ class RuntimeApp:
             action_id = message.get("actionId", "")
             pending = self.pending_action_acks.pop(action_id, None)
             ok = bool(message.get("ok"))
+            result = message.get("result", {}) or {}
+            if ok:
+                self.apply_confirmed_action_result(result)
             if self.action_debug.enabled():
                 print(
                     "[DEBUG][action] result ok={} actionId={} mappingId={} rtt_ms={} result={}".format(
@@ -454,7 +458,7 @@ class RuntimeApp:
                         action_id,
                         message.get("mappingId", ""),
                         time.ticks_diff(time.ticks_ms(), pending.get("sent_at", time.ticks_ms())) if pending else "?",
-                        safe_json(message.get("result", {})),
+                        safe_json(result),
                     )
                 )
             if not ok:
@@ -658,6 +662,35 @@ class RuntimeApp:
         self.navigation.update_inventory(self.managers, self.devices, self.mappings)
         return endpoints
 
+    def apply_confirmed_action_result(self, result):
+        device_id = result.get("deviceId")
+        capability_id = result.get("capabilityId")
+        if not device_id or not capability_id or "appliedValue" not in result:
+            return False
+        applied_value = result.get("appliedValue")
+        changed = False
+        for device in self.devices:
+            if device.id != device_id:
+                continue
+            for capability in device.capabilities:
+                if capability.id == capability_id:
+                    capability.value = applied_value
+                    changed = True
+                    break
+        screen = self.state.current_screen
+        if screen and getattr(screen, "kind", "") == "device" and getattr(screen.device, "id", "") == device_id:
+            changed = screen.set_value(capability_id, applied_value) or changed
+        if changed:
+            self.state.message = "{} confirmed".format(capability_id)
+            self.state.mark_dirty()
+            if self.action_debug.enabled():
+                print("[DEBUG][action] confirmed device={} capability={} appliedValue={}".format(
+                    device_id,
+                    capability_id,
+                    applied_value,
+                ))
+        return changed
+
     def set_connection(self, connected, message):
         self.status.update(
             connected=connected,
@@ -739,11 +772,18 @@ class RuntimeApp:
 
     def ensure_action_socket(self):
         now = time.ticks_ms()
-        if self.socket_ready() and not self.action_socket_is_stale(now):
-            return True
+        if self.socket_ready():
+            if self.recent_ws_activity(now):
+                if not self.ws_force_fresh_action_socket or not self.action_socket_is_stale(now):
+                    return True
+            else:
+                self.mark_ws_unhealthy("activity_timeout", "idle_ms={}".format(
+                    time.ticks_diff(now, max(self.last_rx_ms, self.last_tx_ms, self.last_successful_ws_send_ms))
+                ))
         if self.action_debug.enabled() or self.ws_debug.enabled():
-            print("[DEBUG][ws] action socket refresh needed ready={} age_ms={} idle_ms={} threshold_ms={}".format(
+            print("[DEBUG][ws] action socket refresh needed ready={} force_fresh={} age_ms={} idle_ms={} threshold_ms={}".format(
                 "true" if self.socket_ready() else "false",
+                "true" if self.ws_force_fresh_action_socket else "false",
                 time.ticks_diff(now, self.ws_connected_at_ms) if self.ws_connected_at_ms else -1,
                 time.ticks_diff(now, max(self.last_rx_ms, self.last_tx_ms, self.last_successful_ws_send_ms)),
                 self.ws_action_fresh_ms,

@@ -75,6 +75,13 @@ class DeviceDetailScreen:
         self.values[action.id] = not bool(self.current_value())
         return True
 
+    def set_value(self, capability_id, value):
+        if capability_id not in self.values:
+            return False
+        old = self.values.get(capability_id)
+        self.values[capability_id] = value
+        return old != value
+
 
 class StatusScreen:
     kind = "status"

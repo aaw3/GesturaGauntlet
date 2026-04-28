@@ -143,8 +143,6 @@ class NavigationController:
         if action is None:
             self.state.message = "No actions"
             return True
-        if action.kind == "boolean":
-            screen.toggle_current_local()
         self.state.pending_actions.append(build_action(screen.device, action, screen.current_value()))
         self.state.message = "Action queued"
         return True

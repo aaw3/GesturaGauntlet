@@ -3,6 +3,10 @@ const express = require('express');
 function createGlovesRouter({ gloveConfigService }) {
   const router = express.Router();
 
+  router.get('/', (_req, res) => {
+    res.json(gloveConfigService.listGloves());
+  });
+
   router.get('/:gloveId/config', (req, res) => {
     res.json(gloveConfigService.getConfigSnapshot(req.params.gloveId));
   });

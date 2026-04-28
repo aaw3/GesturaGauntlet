@@ -7,6 +7,7 @@ function createGloveSocketHub({
   gloveConfigService,
   telemetryService,
   actionRouter,
+  statusSocketHub,
   onSensorUpdate,
   getMode,
   setMode,
@@ -84,13 +85,25 @@ function createGloveSocketHub({
             accepted: true,
           });
           const result = await actionRouter.execute(action);
-          send(ws, {
+          const actionResultMessage = {
             type: 'mapped_action_result',
             gloveId: ws.gloveId,
             ts: Date.now(),
             actionId: payload.actionId,
             mappingId: action.mappingId,
             ok: Boolean(result?.ok),
+            result,
+          };
+          send(ws, {
+            ...actionResultMessage,
+          });
+          statusSocketHub?.broadcast?.('device.state', {
+            source: 'glove',
+            gloveId: ws.gloveId,
+            actionId: payload.actionId,
+            mappingId: action.mappingId,
+            deviceId: result?.deviceId || action.deviceId,
+            capabilityId: result?.capabilityId || action.capabilityId,
             result,
           });
           return;

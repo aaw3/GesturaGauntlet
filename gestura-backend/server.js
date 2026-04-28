@@ -295,6 +295,7 @@ gloveSocketHub = createGloveSocketHub({
   gloveConfigService,
   telemetryService,
   actionRouter,
+  statusSocketHub,
   onSensorUpdate: handleSensorUpdate,
   getMode: () => currentMode,
   setMode,

@@ -50,7 +50,7 @@ interface SensorData {
 interface StatusSnapshot {
   mode?: string;
   managers?: unknown[];
-  devices?: unknown[];
+  devices?: DeviceSummary[];
   deviceCount?: number;
   system?: {
     inventory?: {
@@ -64,7 +64,39 @@ interface StatusMessage {
   type: "status.snapshot" | "status.patch" | "device.state" | "manager.registry";
   data?: StatusSnapshot & {
     sensorData?: Partial<SensorData> & { timestamp?: string; source?: string };
+    deviceId?: string;
+    capabilityId?: string;
+    result?: DeviceActionResult;
   };
+}
+
+interface GloveSummary {
+  id: string;
+  name?: string;
+}
+
+interface DeviceSummary {
+  id: string;
+  name?: string;
+}
+
+interface GloveMapping {
+  targetDeviceId?: string;
+  targetCapabilityId?: string;
+  enabled?: boolean;
+}
+
+interface GloveConfig {
+  gloveId?: string;
+  devices?: DeviceSummary[];
+  mappings?: GloveMapping[];
+}
+
+interface DeviceActionResult {
+  ok?: boolean;
+  deviceId?: string;
+  capabilityId?: string;
+  appliedValue?: string | number | boolean | null;
 }
 
 const emptySensorData: SensorData = {
@@ -86,8 +118,11 @@ let socket: Socket | null = null;
 export default function Dashboard() {
   const [networkStatus, setNetworkStatus] = useState<NetworkStatus>("unknown");
   const [activeMode, setActiveMode] = useState<GloveMode>("passive");
-  const [selectedDevice] = useState("desk_lamp");
-  const [selectedAction] = useState("brightness");
+  const [selectedGloveId, setSelectedGloveId] = useState("primary_glove");
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
+  const [selectedDevice, setSelectedDevice] = useState("waiting");
+  const [selectedAction, setSelectedAction] = useState("waiting");
+  const [confirmedDeviceState, setConfirmedDeviceState] = useState<Record<string, Record<string, string | number | boolean | null>>>({});
   const [managerCount, setManagerCount] = useState(0);
   const [deviceCount, setDeviceCount] = useState(0);
   const [sensorData, setSensorData] = useState<SensorData>(emptySensorData);
@@ -138,6 +173,18 @@ export default function Dashboard() {
 
   const updateDeviceState = useCallback((data: StatusMessage["data"] = {}) => {
     if (data.sensorData) updateSensorState(data.sensorData);
+    const result = data.result;
+    const deviceId = result?.deviceId ?? data.deviceId;
+    const capabilityId = result?.capabilityId ?? data.capabilityId;
+    if (deviceId && capabilityId && result && "appliedValue" in result) {
+      setConfirmedDeviceState((current) => ({
+        ...current,
+        [deviceId]: {
+          ...(current[deviceId] ?? {}),
+          [capabilityId]: result.appliedValue ?? null,
+        },
+      }));
+    }
   }, [updateSensorState]);
 
   const updateManagerRegistry = useCallback((data: StatusSnapshot = {}) => {
@@ -235,6 +282,43 @@ export default function Dashboard() {
   }, [applyFullSnapshot, applyPartialUpdate, refreshStatus, updateDeviceState, updateManagerRegistry]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    async function loadSelectedGloveTarget() {
+      try {
+        const glovesResponse = await fetch("/api/gloves");
+        if (!glovesResponse.ok) throw new Error(`Gloves ${glovesResponse.status}`);
+        const gloves = (await glovesResponse.json()) as GloveSummary[];
+        const gloveId = gloves[0]?.id ?? "primary_glove";
+        const configResponse = await fetch(`/api/gloves/${encodeURIComponent(gloveId)}/config`);
+        if (!configResponse.ok) throw new Error(`Glove config ${configResponse.status}`);
+        const config = (await configResponse.json()) as GloveConfig;
+        if (cancelled) return;
+
+        const mapping = (config.mappings ?? []).find((item) => item.enabled !== false);
+        const deviceId = mapping?.targetDeviceId ?? config.devices?.[0]?.id ?? "none";
+        const deviceName = config.devices?.find((device) => device.id === deviceId)?.name ?? deviceId;
+        setSelectedGloveId(gloveId);
+        setSelectedDeviceId(deviceId === "none" ? null : deviceId);
+        setSelectedDevice(deviceName);
+        setSelectedAction(mapping?.targetCapabilityId ?? "none");
+      } catch {
+        if (!cancelled) {
+          setSelectedGloveId("primary_glove");
+          setSelectedDeviceId(null);
+          setSelectedDevice("unavailable");
+          setSelectedAction("unavailable");
+        }
+      }
+    }
+
+    void loadSelectedGloveTarget();
+    return () => {
+      cancelled = true;
+    };
+  }, [lastStatusSync]);
+
+  useEffect(() => {
     let interval: NodeJS.Timeout;
 
     if (isSimulating) {
@@ -262,8 +346,8 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!showSensorData || isSimulating) return;
-    socket?.emit("requestSensorSnapshot", { gloveId: "primary_glove" });
-  }, [showSensorData, isSimulating]);
+    socket?.emit("requestSensorSnapshot", { gloveId: selectedGloveId });
+  }, [showSensorData, isSimulating, selectedGloveId]);
 
   const sensorAge = useMemo(() => {
     if (!sensorStatus.lastUpdatedAt) return "No samples";
@@ -272,6 +356,17 @@ export default function Dashboard() {
     if (ageMs < 1000) return "Live";
     return `${Math.round(ageMs / 1000)}s ago`;
   }, [sensorStatus.lastUpdatedAt]);
+
+  const selectedConfirmedValue = useMemo(() => {
+    if (!selectedDeviceId) return "pending";
+    const deviceState = confirmedDeviceState[selectedDeviceId];
+    if (deviceState && Object.prototype.hasOwnProperty.call(deviceState, selectedAction)) {
+      const value = deviceState[selectedAction];
+      if (typeof value === "boolean") return value ? "ON" : "OFF";
+      return value === null || value === undefined ? "unknown" : String(value);
+    }
+    return "pending";
+  }, [confirmedDeviceState, selectedAction, selectedDeviceId]);
 
   const handleModeChange = (mode: GloveMode) => {
     setActiveMode(mode);
@@ -342,6 +437,7 @@ export default function Dashboard() {
                   </Badge>
                   <Badge variant="outline">{selectedDevice}</Badge>
                   <Badge variant="outline">{selectedAction}</Badge>
+                  <Badge variant="outline">{selectedConfirmedValue}</Badge>
                 </div>
                 <h2 className="text-3xl font-semibold tracking-tight">Glove Control State</h2>
                 <p className="mt-2 max-w-2xl text-sm text-muted-foreground">

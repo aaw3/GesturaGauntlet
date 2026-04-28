@@ -49,6 +49,17 @@ class GloveConfigService {
     return snapshot;
   }
 
+  listGloves() {
+    const ids = new Set(['primary_glove']);
+    for (const mapping of this.mappingService.list()) {
+      if (mapping.gloveId) ids.add(mapping.gloveId);
+    }
+    for (const network of this.wifiNetworks.values()) {
+      if (network.gloveId) ids.add(network.gloveId);
+    }
+    return Array.from(ids).sort().map((id) => ({ id, name: id }));
+  }
+
   resolveMappings(gloveId) {
     return this.mappingService.listForGloveOrAll(gloveId).filter((mapping) => mapping.enabled !== false);
   }

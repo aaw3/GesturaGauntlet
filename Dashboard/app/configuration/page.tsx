@@ -156,11 +156,12 @@ export default function ConfigurationPage() {
     const payload = nextMappings
       .filter((mapping) => mapping.targetDevice === deviceId)
       .map(toGloveMappingContract);
+    const dedupedPayload = Array.from(new Map(payload.map((mapping) => [mapping.id, mapping])).values());
 
     const response = await fetch(`/api/mappings/devices/${encodeURIComponent(deviceId)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(dedupedPayload),
     });
 
     if (!response.ok) {
