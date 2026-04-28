@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import type { ElementType } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
 import {
   Activity,
@@ -21,7 +21,6 @@ import { LiveSensorData } from "@/components/dashboard/live-sensor-data";
 import { NetworkStatusIndicator } from "@/components/dashboard/network-status-indicator";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 
@@ -46,6 +45,26 @@ interface SensorData {
   gy: number;
   gz: number;
   pressure: number;
+}
+
+interface StatusSnapshot {
+  mode?: string;
+  managers?: unknown[];
+  devices?: unknown[];
+  deviceCount?: number;
+  system?: {
+    inventory?: {
+      managerCount?: number;
+      deviceCount?: number;
+    };
+  };
+}
+
+interface StatusMessage {
+  type: "status.snapshot" | "status.patch" | "device.state" | "manager.registry";
+  data?: StatusSnapshot & {
+    sensorData?: Partial<SensorData> & { timestamp?: string; source?: string };
+  };
 }
 
 const emptySensorData: SensorData = {
@@ -81,52 +100,139 @@ export default function Dashboard() {
   const [isSimulating, setIsSimulating] = useState(false);
   const [statusLatencyMs, setStatusLatencyMs] = useState<number | null>(null);
   const [lastStatusSync, setLastStatusSync] = useState<string | null>(null);
+  const statusSocketRef = useRef<WebSocket | null>(null);
+  const isSimulatingRef = useRef(isSimulating);
+
+  useEffect(() => {
+    isSimulatingRef.current = isSimulating;
+  }, [isSimulating]);
+
+  const updateSensorState = useCallback((data: Partial<SensorData> & { timestamp?: string; source?: string }) => {
+    if (isSimulatingRef.current) return;
+    const normalized = normalizeSensorData(data);
+    setSensorData(normalized);
+    setSensorStatus((current) => ({
+      sampleCount: current.sampleCount + 1,
+      lastUpdatedAt: data.timestamp ?? new Date().toISOString(),
+      source: data.source ?? current.source ?? "websocket",
+    }));
+  }, []);
+
+  const applyPartialUpdate = useCallback((data: StatusSnapshot = {}) => {
+    if (data.mode === "active" || data.mode === "passive") setActiveMode(data.mode);
+    if (Array.isArray(data.managers)) setManagerCount(data.managers.length);
+    if (Array.isArray(data.devices)) setDeviceCount(data.devices.length);
+    if (typeof data.deviceCount === "number") setDeviceCount(data.deviceCount);
+    if (typeof data.system?.inventory?.managerCount === "number") {
+      setManagerCount(data.system.inventory.managerCount);
+    }
+    if (typeof data.system?.inventory?.deviceCount === "number") {
+      setDeviceCount(data.system.inventory.deviceCount);
+    }
+  }, []);
+
+  const applyFullSnapshot = useCallback((data: StatusSnapshot = {}) => {
+    applyPartialUpdate(data);
+    setLastStatusSync(new Date().toLocaleTimeString());
+  }, [applyPartialUpdate]);
+
+  const updateDeviceState = useCallback((data: StatusMessage["data"] = {}) => {
+    if (data.sensorData) updateSensorState(data.sensorData);
+  }, [updateSensorState]);
+
+  const updateManagerRegistry = useCallback((data: StatusSnapshot = {}) => {
+    applyPartialUpdate(data);
+    setLastStatusSync(new Date().toLocaleTimeString());
+  }, [applyPartialUpdate]);
+
+  const refreshStatus = useCallback(async () => {
+    const startedAt = performance.now();
+    try {
+      const response = await fetch("/api/status");
+      if (!response.ok) throw new Error(`Status ${response.status}`);
+      const data = await response.json();
+      setStatusLatencyMs(Math.round(performance.now() - startedAt));
+      applyFullSnapshot(data);
+    } catch {
+      setStatusLatencyMs(null);
+      setNetworkStatus((current) => (current === "connected" ? current : "disconnected"));
+    }
+  }, [applyFullSnapshot]);
 
   useEffect(() => {
     socket = io('/', {
       withCredentials: true,
     });
 
-    socket.on("connect", () => {
-      setNetworkStatus("connected");
-      socket?.emit("getMode");
-    });
-
-    socket.on("disconnect", () => {
-      setNetworkStatus("disconnected");
-    });
-
     socket.on("connect_error", () => {
       window.location.href = "/login";
-    });
-
-    socket.on("modeUpdate", (newMode: string) => {
-      const normalizedMode = newMode?.toLowerCase();
-      if (normalizedMode === "active" || normalizedMode === "passive") {
-        setActiveMode(normalizedMode);
-      }
-    });
-
-    socket.on("managers", (managers: unknown[]) => {
-      setManagerCount(Array.isArray(managers) ? managers.length : 0);
-    });
-
-    socket.on("sensorData", (data: Partial<SensorData> & { timestamp?: string; source?: string }) => {
-      if (isSimulating) return;
-      const normalized = normalizeSensorData(data);
-      setSensorData(normalized);
-      setSensorStatus((current) => ({
-        sampleCount: current.sampleCount + 1,
-        lastUpdatedAt: data.timestamp ?? new Date().toISOString(),
-        source: data.source ?? current.source ?? "websocket",
-      }));
     });
 
     return () => {
       socket?.disconnect();
       socket = null;
     };
-  }, [isSimulating]);
+  }, []);
+
+  useEffect(() => {
+    let closed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempt = 0;
+
+    const connect = () => {
+      const ws = new WebSocket(statusWebSocketUrl());
+      statusSocketRef.current = ws;
+
+      ws.onopen = () => {
+        reconnectAttempt = 0;
+        setNetworkStatus("connected");
+      };
+
+      ws.onmessage = (event) => {
+        const msg = parseStatusMessage(event.data);
+        if (!msg) return;
+
+        switch (msg.type) {
+          case "status.snapshot":
+            applyFullSnapshot(msg.data);
+            break;
+          case "status.patch":
+            applyPartialUpdate(msg.data);
+            break;
+          case "device.state":
+            updateDeviceState(msg.data);
+            break;
+          case "manager.registry":
+            updateManagerRegistry(msg.data);
+            break;
+        }
+      };
+
+      ws.onerror = () => {
+        setNetworkStatus("disconnected");
+      };
+
+      ws.onclose = () => {
+        if (statusSocketRef.current === ws) statusSocketRef.current = null;
+        if (closed) return;
+        setNetworkStatus("disconnected");
+        const delay = Math.min(1000 * 2 ** reconnectAttempt, 15000);
+        reconnectAttempt += 1;
+        reconnectTimer = setTimeout(connect, delay);
+      };
+    };
+
+    void refreshStatus().finally(() => {
+      if (!closed) connect();
+    });
+
+    return () => {
+      closed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      statusSocketRef.current?.close();
+      statusSocketRef.current = null;
+    };
+  }, [applyFullSnapshot, applyPartialUpdate, refreshStatus, updateDeviceState, updateManagerRegistry]);
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -156,35 +262,8 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!showSensorData || isSimulating) return;
-
-    const requestSnapshot = () => socket?.emit("requestSensorSnapshot", { gloveId: "primary_glove" });
-    requestSnapshot();
-    const interval = setInterval(requestSnapshot, 500);
-    return () => clearInterval(interval);
+    socket?.emit("requestSensorSnapshot", { gloveId: "primary_glove" });
   }, [showSensorData, isSimulating]);
-
-  const refreshStatus = async () => {
-    const startedAt = performance.now();
-    try {
-      const response = await fetch("/api/status");
-      if (!response.ok) throw new Error(`Status ${response.status}`);
-      const data = await response.json();
-      setStatusLatencyMs(Math.round(performance.now() - startedAt));
-      setLastStatusSync(new Date().toLocaleTimeString());
-      if (data.mode === "active" || data.mode === "passive") setActiveMode(data.mode);
-      if (Array.isArray(data.managers)) setManagerCount(data.managers.length);
-      if (typeof data.deviceCount === "number") setDeviceCount(data.deviceCount);
-    } catch {
-      setStatusLatencyMs(null);
-      setNetworkStatus((current) => (current === "connected" ? current : "disconnected"));
-    }
-  };
-
-  useEffect(() => {
-    void refreshStatus();
-    const interval = setInterval(refreshStatus, 5000);
-    return () => clearInterval(interval);
-  }, []);
 
   const sensorAge = useMemo(() => {
     if (!sensorStatus.lastUpdatedAt) return "No samples";
@@ -364,7 +443,61 @@ export default function Dashboard() {
   );
 }
 
+function normalizeSensorData(data: Partial<SensorData>): SensorData {
+  return {
+    roll: Number(data.roll ?? data.x ?? 0),
+    pitch: Number(data.pitch ?? data.y ?? 0),
+    roll_deg: Number(data.roll_deg ?? 0),
+    pitch_deg: Number(data.pitch_deg ?? 0),
+    x: Number(data.x ?? 0),
+    y: Number(data.y ?? 0),
+    z: Number(data.z ?? 0),
+    gx: Number(data.gx ?? 0),
+    gy: Number(data.gy ?? 0),
+    gz: Number(data.gz ?? 0),
+    pressure: Number(data.pressure ?? 0),
+  };
+}
 
+function parseStatusMessage(value: unknown): StatusMessage | null {
+  try {
+    const parsed = JSON.parse(String(value)) as Partial<StatusMessage>;
+    if (
+      parsed.type === "status.snapshot" ||
+      parsed.type === "status.patch" ||
+      parsed.type === "device.state" ||
+      parsed.type === "manager.registry"
+    ) {
+      return { type: parsed.type, data: parsed.data };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function statusWebSocketUrl() {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/api/ws/status`;
+}
+
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-4 border-t border-border/60 pt-3 text-sm">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="truncate text-right font-mono text-xs text-foreground">{value}</span>
+    </div>
+  );
+}
+
+function InfoTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-border bg-background p-4">
+      <div className="text-xs font-medium uppercase text-muted-foreground">{label}</div>
+      <div className="mt-2 truncate font-mono text-lg font-semibold">{value}</div>
+    </div>
+  );
+}
 
 function MetricTile({
   label,
@@ -391,78 +524,6 @@ function MetricTile({
         <Icon className={`size-4 ${toneClass}`} />
       </div>
       <div className="truncate text-xl font-semibold tracking-tight">{value}</div>
-    </div>
-  );
-}
-
-function resolveBackendSocketUrl() {
-  if (process.env.NEXT_PUBLIC_GESTURA_BACKEND_URL) {
-    return process.env.NEXT_PUBLIC_GESTURA_BACKEND_URL;
-  }
-
-  if (typeof window === "undefined") return undefined;
-
-  if (window.location.port === "3000" || window.location.port === "3100") {
-    return `${window.location.protocol}//${window.location.hostname}:3001`;
-  }
-
-  return undefined;
-}
-
-function normalizeSensorData(data: Partial<SensorData>): SensorData {
-  return {
-    roll: Number(data.roll ?? data.x ?? 0),
-    pitch: Number(data.pitch ?? data.y ?? 0),
-    roll_deg: Number(data.roll_deg ?? 0),
-    pitch_deg: Number(data.pitch_deg ?? 0),
-    x: Number(data.x ?? 0),
-    y: Number(data.y ?? 0),
-    z: Number(data.z ?? 0),
-    gx: Number(data.gx ?? 0),
-    gy: Number(data.gy ?? 0),
-    gz: Number(data.gz ?? 0),
-    pressure: Number(data.pressure ?? 0),
-  };
-}
-
-function InfoRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-4 text-sm">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="truncate text-right font-mono text-xs text-foreground">{value}</span>
-    </div>
-  );
-}
-
-function InfoTile({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl border border-border bg-gradient-to-br from-card to-card/80 p-5 ring-1 ring-primary/5">
-      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className="mt-2 truncate font-mono text-xl font-bold text-foreground">{value}</div>
-    </div>
-  );
-}
-
-function RuntimeCard({
-  title,
-  icon: Icon,
-  rows,
-}: {
-  title: string;
-  icon: ElementType;
-  rows: Array<[string, string]>;
-}) {
-  return (
-    <div className="rounded-xl border border-border bg-gradient-to-br from-card to-card/80 p-6 ring-1 ring-primary/5">
-      <div className="mb-4 flex items-center gap-2">
-        <Icon className="h-5 w-5 text-primary" />
-        <h2 className="font-semibold text-card-foreground">{title}</h2>
-      </div>
-      <div className="space-y-3">
-        {rows.map(([label, value]) => (
-          <InfoRow key={label} label={label} value={value} />
-        ))}
-      </div>
     </div>
   );
 }

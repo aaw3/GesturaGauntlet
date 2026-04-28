@@ -18,6 +18,11 @@ class MappingService {
     return gloveId ? all.filter((mapping) => mapping.gloveId === gloveId) : all;
   }
 
+  listForGloveOrAll(gloveId) {
+    const exact = this.list(gloveId);
+    return exact.length > 0 || !gloveId ? exact : this.list();
+  }
+
   get(id) {
     const mapping = this.mappings.get(id);
     return mapping ? clone(mapping) : null;
@@ -51,7 +56,7 @@ class MappingService {
   }
 
   findForInput(gloveId, inputSource) {
-    return this.list(gloveId).filter(
+    return this.listForGloveOrAll(gloveId).filter(
       (mapping) => mapping.enabled && mapping.inputSource === inputSource,
     );
   }

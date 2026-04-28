@@ -29,6 +29,7 @@ function createManagersRouter({ managerService, deviceRegistry, deviceSyncServic
     }
 
     await deviceRegistry.clearManagerDevices(req.params.managerId);
+    broadcastRegistry({ managerService, deviceRegistry, statusSocketHub: req.app?.locals?.statusSocketHub });
     res.json({ ok: true, managerId: req.params.managerId });
   });
 
@@ -37,7 +38,9 @@ function createManagersRouter({ managerService, deviceRegistry, deviceSyncServic
   });
 
   router.post('/:managerId/sync', async (req, res) => {
-    res.json(await deviceSyncService.syncManager(req.params.managerId));
+    const result = await deviceSyncService.syncManager(req.params.managerId);
+    broadcastRegistry({ managerService, deviceRegistry, statusSocketHub: req.app?.locals?.statusSocketHub });
+    res.json(result);
   });
 
   router.post('/:managerId/discover', async (req, res) => {
@@ -69,6 +72,7 @@ function createManagersRouter({ managerService, deviceRegistry, deviceSyncServic
       },
     ]);
 
+    broadcastRegistry({ managerService, deviceRegistry, statusSocketHub: req.app?.locals?.statusSocketHub });
     res.json(sync);
   });
 
@@ -104,6 +108,7 @@ function createManagersRouter({ managerService, deviceRegistry, deviceSyncServic
       },
     ]);
 
+    broadcastRegistry({ managerService, deviceRegistry, statusSocketHub: req.app?.locals?.statusSocketHub });
     res.json({
       ok: true,
       managerId: req.params.managerId,
@@ -114,6 +119,14 @@ function createManagersRouter({ managerService, deviceRegistry, deviceSyncServic
   });
 
   return router;
+}
+
+function broadcastRegistry({ managerService, deviceRegistry, statusSocketHub }) {
+  statusSocketHub?.broadcast('manager.registry', {
+    managers: managerService.getInfos(),
+    devices: deviceRegistry.getAll(),
+    deviceCount: deviceRegistry.getAll().length,
+  });
 }
 
 module.exports = { createManagersRouter };

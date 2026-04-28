@@ -50,6 +50,10 @@ function registerNodeAgentSocket(io, services) {
       });
       ack?.({ ok: true, node, config: services.gloveConfigService.getConfigSnapshot('default') });
       io.emit('nodes', services.nodeRegistry.getAll());
+      services.statusSocketHub?.broadcast('status.patch', {
+        nodes: services.nodeRegistry.getAll(),
+        system: services.systemStatus?.(),
+      });
     });
 
     socket.on('node:heartbeat', (payload = {}, ack) => {
@@ -86,6 +90,7 @@ function registerNodeAgentSocket(io, services) {
       ack?.({ ok: true, manager: manager.getInfo() });
       io.emit('managers', services.managerService.getInfos());
       io.emit('devices', services.deviceRegistry.getAll());
+      broadcastRegistry(services);
     });
 
     socket.on('devices:sync', async (payload = {}, ack) => {
@@ -108,6 +113,7 @@ function registerNodeAgentSocket(io, services) {
       }
       ack?.({ ok: true, count: devices.length });
       io.emit('devices', services.deviceRegistry.getAll());
+      broadcastRegistry(services);
     });
 
     socket.on('manager:status', async (payload = {}, ack) => {
@@ -126,6 +132,7 @@ function registerNodeAgentSocket(io, services) {
       });
       ack?.({ ok: Boolean(info), manager: info });
       io.emit('managers', services.managerService.getInfos());
+      broadcastRegistry(services);
     });
 
     socket.on('route:metric', async (metric = {}, ack) => {
@@ -151,12 +158,14 @@ function registerNodeAgentSocket(io, services) {
     });
 
     socket.on('glove:sensorSnapshot', (payload = {}, ack) => {
-      io.emit('sensorData', {
+      const latest = {
         ...normalizeSensorPayload(payload),
         pressure: Number(payload.pressure ?? 0),
         timestamp: new Date().toISOString(),
         source: `edge-node:${payload.nodeId || currentNodeId || 'unknown'}`,
-      });
+      };
+      io.emit('sensorData', latest);
+      services.statusSocketHub?.broadcast('device.state', { sensorData: latest });
       ack?.({ ok: true });
     });
 
@@ -164,8 +173,21 @@ function registerNodeAgentSocket(io, services) {
       if (currentNodeId) {
         services.nodeRegistry.markOffline(currentNodeId);
         io.emit('nodes', services.nodeRegistry.getAll());
+        services.statusSocketHub?.broadcast('status.patch', {
+          nodes: services.nodeRegistry.getAll(),
+          system: services.systemStatus?.(),
+        });
       }
     });
+  });
+}
+
+function broadcastRegistry(services) {
+  services.statusSocketHub?.broadcast('manager.registry', {
+    managers: services.managerService.getInfos(),
+    devices: services.deviceRegistry.getAll(),
+    deviceCount: services.deviceRegistry.getAll().length,
+    system: services.systemStatus?.(),
   });
 }
 

@@ -89,7 +89,7 @@ class NavigationController:
             return False
 
         if screen.kind == "device":
-            if name == "top_click":
+            if name in ("top_click", "top_hold"):
                 changed = screen.cycle_action()
                 self.state.selected_action_index = screen.action_index
                 return changed
@@ -238,7 +238,7 @@ class NavigationController:
         manager.set_override(ssid)
         self.state.wifi_reconnect_requested = True
         self.state.message = "WiFi override"
-        self.state.status.update(wifi_ssid=ssid, connected=False, route="OFFLINE")
+        self.state.status.update(wifi_ssid=ssid, wifi_connected=False, connected=False, ws_connected=False, route="OFFLINE")
         return True
 
     def select_wifi_auto(self):
@@ -248,7 +248,7 @@ class NavigationController:
         manager.clear_override()
         self.state.wifi_reconnect_requested = True
         self.state.message = "WiFi auto"
-        self.state.status.update(connected=False, route="OFFLINE")
+        self.state.status.update(wifi_connected=False, connected=False, ws_connected=False, route="OFFLINE")
         return True
 
     def refresh_current_screen(self):
@@ -319,6 +319,8 @@ def describe_event_action(event_type, screen_kind):
     if screen_kind == "device":
         if event_type == "top_click":
             return "next_device_action"
+        if event_type == "top_hold":
+            return "cycle_device_action"
         if event_type == "bottom_hold":
             return "adjust_selected_action_value"
         if event_type == "bottom_click":

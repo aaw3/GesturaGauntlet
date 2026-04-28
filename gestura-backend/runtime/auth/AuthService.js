@@ -171,6 +171,15 @@ class AuthService {
     }
   }
 
+  authenticateDashboardUpgrade(req) {
+    const cookieHeader = req.headers.cookie || '';
+    const token =
+      parseCookie(cookieHeader)[SESSION_COOKIE_NAME] ||
+      extractBearerFromHandshake(req.headers?.authorization);
+
+    return this.verifySessionToken(token);
+  }
+
   hasValidPicoTokenRequest(req, searchParams = null) {
     const expectedPicoToken =
       process.env.PICO_API_TOKEN ||

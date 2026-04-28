@@ -19,12 +19,18 @@ class GloveConfigService {
   getConfigSnapshot(gloveId) {
     const managers = this.managerService.getInfos();
     const managerById = new Map(managers.map((manager) => [manager.id, manager]));
+    const mappings = this.resolveMappings(gloveId);
+    const enabledCapabilities = capabilitiesByDevice(mappings);
     return {
       gloveId,
       ts: Date.now(),
-      mappings: this.mappingService.list(gloveId).filter((mapping) => mapping.enabled !== false),
+      mappings,
       devices: this.deviceRegistry.getAll().map((device) => ({
         ...device,
+        capabilities: (device.capabilities || []).filter((capability) => {
+          const allowed = enabledCapabilities.get(device.id);
+          return allowed ? allowed.has(capability.id) : false;
+        }),
         provenance: provenanceForDevice(device, managerById),
       })),
       managers,
@@ -37,6 +43,10 @@ class GloveConfigService {
         lanCooldownMs: 15_000,
       },
     };
+  }
+
+  resolveMappings(gloveId) {
+    return this.mappingService.listForGloveOrAll(gloveId).filter((mapping) => mapping.enabled !== false);
   }
 
   async loadPersisted() {
@@ -146,6 +156,16 @@ function provenanceForDevice(device, managerById) {
     managerIconKey: manager?.metadata?.iconKey,
     managerColorKey: manager?.metadata?.colorKey,
   };
+}
+
+function capabilitiesByDevice(mappings) {
+  const byDevice = new Map();
+  for (const mapping of mappings || []) {
+    if (!mapping.targetDeviceId || !mapping.targetCapabilityId) continue;
+    if (!byDevice.has(mapping.targetDeviceId)) byDevice.set(mapping.targetDeviceId, new Set());
+    byDevice.get(mapping.targetDeviceId).add(mapping.targetCapabilityId);
+  }
+  return byDevice;
 }
 
 function normalizeInterfaces(interfaces = []) {

@@ -10,6 +10,7 @@ function createMappingsRouter({ mappingService, telemetryService }) {
   router.post('/', async (req, res) => {
     const mapping = await mappingService.upsert(req.body);
     await recordMappingChanged(telemetryService, 'upsert', mapping);
+    broadcastMappings(req.app?.locals?.statusSocketHub, mappingService);
     res.status(201).json(mapping);
   });
 
@@ -19,12 +20,14 @@ function createMappingsRouter({ mappingService, telemetryService }) {
       deviceId: req.params.deviceId,
       mappingCount: mappings.length,
     });
+    broadcastMappings(req.app?.locals?.statusSocketHub, mappingService);
     res.json(mappings);
   });
 
   router.delete('/:mappingId', async (req, res) => {
     const ok = await mappingService.remove(req.params.mappingId);
     await recordMappingChanged(telemetryService, 'delete', { mappingId: req.params.mappingId, ok });
+    broadcastMappings(req.app?.locals?.statusSocketHub, mappingService);
     res.json({ ok });
   });
 
@@ -34,6 +37,7 @@ function createMappingsRouter({ mappingService, telemetryService }) {
       id: req.params.mappingId,
     });
     await recordMappingChanged(telemetryService, 'upsert', mapping);
+    broadcastMappings(req.app?.locals?.statusSocketHub, mappingService);
     res.json(mapping);
   });
 
@@ -49,4 +53,10 @@ function recordMappingChanged(telemetryService, operation, payload) {
       payload: { operation, ...payload },
     },
   ]);
+}
+
+function broadcastMappings(statusSocketHub, mappingService) {
+  statusSocketHub?.broadcast('manager.registry', {
+    mappings: mappingService.list(),
+  });
 }

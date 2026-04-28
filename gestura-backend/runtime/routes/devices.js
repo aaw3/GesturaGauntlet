@@ -49,6 +49,11 @@ router.post('/:deviceId/actions/:capabilityId', async (req, res) => {
       capabilityId: req.params.capabilityId,
     });
 
+    req.app?.locals?.statusSocketHub?.broadcast('device.state', {
+      deviceId: req.params.deviceId,
+      capabilityId: req.params.capabilityId,
+      result,
+    });
     res.status(result?.ok === false ? 502 : 200).json(result);
   } catch (err) {
     res.status(err.status || 502).json({

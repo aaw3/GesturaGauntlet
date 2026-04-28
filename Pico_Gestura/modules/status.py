@@ -10,6 +10,8 @@ class StatusState:
         self.battery = "--"
         self.rtt_ms = 0
         self.connected = False
+        self.wifi_connected = False
+        self.ws_connected = False
         self.degraded = False
         self.mapping_count = 0
         self.device_count = 0
@@ -55,6 +57,8 @@ class StatusState:
             ("Node", short_text(self.node_name, 14)),
             ("Battery", self.battery),
             ("RTT", "{}ms".format(self.rtt_ms or 0)),
+            ("WiFi", "ONLINE" if self.wifi_connected else "OFFLINE"),
+            ("WSS", "ONLINE" if self.ws_connected else "OFFLINE"),
             ("Conn", "ONLINE" if self.connected else "OFFLINE"),
             ("Maps", str(self.mapping_count)),
             ("Devices", str(self.device_count)),

@@ -1,6 +1,7 @@
 import math
 import network
 import time
+import ujson
 import uasyncio as asyncio
 
 from lib.endpoint_cache import EndpointCache
@@ -24,16 +25,25 @@ class RuntimeApp:
         self.pico_api_token = env.get("PICO_API_TOKEN", "")
         self.metric_interval_sec = int(env.get("METRIC_INTERVAL_SEC", "300"))
         self.action_send_interval_ms = int(env.get("ACTION_SEND_INTERVAL_MS", "250"))
+        self.ws_heartbeat_ms = int(env.get("WS_HEARTBEAT_MS", "20000"))
+        self.action_ack_timeout_ms = int(env.get("ACTION_ACK_TIMEOUT_MS", "5000"))
         self.endpoint_cache_path = env.get("ENDPOINT_CACHE_PATH", "endpoint_cache.json")
         self.ca_der_path = env.get("CA_DER_PATH", "")
         self.status = StatusState(env.get("WIFI_SSID", ""))
         self.status.update(battery=env.get("BATTERY_LABEL", "--"))
+        if wifi_manager:
+            self.status.update(
+                wifi_connected=wifi_manager.is_connected(),
+                wifi_ssid=wifi_manager.current_ssid() or env.get("WIFI_SSID", ""),
+            )
         self.state = AppState(self.status)
         self.state.wifi_manager = wifi_manager
         debug_config = env.get("DEBUG_CONFIG")
         self.navigation = NavigationController(self.state, debug_config=debug_config)
         self.imu_debug = DebugPrinter(env.get("DEBUG_CONFIG"), "imu")
         self.wifi_debug = DebugPrinter(debug_config, "wifi")
+        self.action_debug = DebugPrinter(debug_config, "action")
+        self.ws_debug = DebugPrinter(debug_config, "ws")
         self.transport = None
         self.active_endpoint = None
         self.config_source = "offline"
@@ -57,6 +67,8 @@ class RuntimeApp:
         self.messages_sent = 0
         self.messages_failed = 0
         self.last_action_values = {}
+        self.action_seq = 0
+        self.pending_action_acks = {}
         self.background_tasks = []
 
     def start_background_tasks(self):
@@ -72,43 +84,96 @@ class RuntimeApp:
         self.navigation.handle_events(input_events)
         if self.wifi_manager:
             if self.state.wifi_reconnect_requested:
-                self.status.update(connected=False, route="OFFLINE")
+                self.status.update(wifi_connected=False, connected=False, ws_connected=False, route="OFFLINE")
                 if self.wifi_manager.connect_best(timeout_sec=10):
-                    self.status.update(wifi_ssid=self.wifi_manager.current_ssid(), last_error="")
+                    self.status.update(wifi_ssid=self.wifi_manager.current_ssid(), wifi_connected=True, last_error="")
                     self.active_endpoint = None
                 self.state.wifi_reconnect_requested = False
                 self.state.mark_dirty()
             elif self.wifi_manager.override_ssid and self.wifi_manager.current_ssid() != self.wifi_manager.override_ssid:
-                self.status.update(connected=False, route="OFFLINE")
+                self.status.update(wifi_connected=False, connected=False, ws_connected=False, route="OFFLINE")
                 if self.wifi_manager.connect_override():
-                    self.status.update(wifi_ssid=self.wifi_manager.current_ssid(), last_error="")
+                    self.status.update(wifi_ssid=self.wifi_manager.current_ssid(), wifi_connected=True, last_error="")
                     self.active_endpoint = None
                 self.state.mark_dirty()
         for action in self.navigation.pop_pending_actions():
+            if self.action_debug.enabled():
+                print("[DEBUG][action] dequeued {}".format(safe_json(action)))
             self.send_action(action)
         await asyncio.sleep_ms(0)
 
     def send_action(self, action):
-        if not self.transport:
+        if self.action_debug.enabled():
+            print(
+                "[DEBUG][action] send requested connected={} transport={} endpoint={} route={} action={}".format(
+                    self.status.connected,
+                    "yes" if self.transport else "no",
+                    self.active_endpoint or "none",
+                    self.status.route,
+                    describe_action(action),
+                )
+            )
+        if not self.socket_ready():
+            if self.action_debug.enabled():
+                print(
+                    "[DEBUG][action] send blocked: ws unhealthy active_endpoint={} ws_connected={} wifi_connected={} last_error={} transport_error={}".format(
+                        self.active_endpoint or "none",
+                        self.status.ws_connected,
+                        self.status.wifi_connected,
+                        self.status.last_error or "none",
+                        getattr(self.transport, "last_error", "") if self.transport else "none",
+                    )
+                )
             self.state.message = "No connection"
             self.state.mark_dirty()
             return False
+        self.action_seq += 1
+        action_id = "{}-{}".format(time.ticks_ms(), self.action_seq)
+        payload = {
+            "type": "mapped_action",
+            "gloveId": self.glove_id,
+            "ts": time.ticks_ms(),
+            "actionId": action_id,
+            "action": action,
+        }
         try:
-            self.transport.send_json({
-                "type": "mapped_action",
-                "gloveId": self.glove_id,
-                "ts": time.ticks_ms(),
-                "action": action,
-            })
+            if self.action_debug.enabled():
+                print("[DEBUG][action] payload {}".format(safe_json(payload)))
+            self.transport.send_json(payload)
             self.messages_sent += 1
+            self.pending_action_acks[action_id] = {
+                "sent_at": time.ticks_ms(),
+                "action": action,
+            }
             self.state.message = "Sent {}".format(action.get("capabilityId", "action"))
             self.state.mark_dirty()
+            if self.action_debug.enabled():
+                print(
+                    "[DEBUG][action] send ok sent={} failed={} device={} capability={}".format(
+                        self.messages_sent,
+                        self.messages_failed,
+                        action.get("deviceId", "?"),
+                        action.get("capabilityId", "?"),
+                    )
+                )
             return True
         except Exception as exc:
             self.messages_failed += 1
-            self.status.update(last_error=str(exc), connected=False)
+            self.mark_ws_unhealthy("send_action", exc)
             self.state.message = "Send failed"
             self.state.mark_dirty()
+            if self.action_debug.enabled():
+                print(
+                    "[DEBUG][action] send failed type={} error={} sent={} failed={} transport={} endpoint={} ws_url={}".format(
+                        type(exc).__name__,
+                        repr(exc),
+                        self.messages_sent,
+                        self.messages_failed,
+                        "yes" if self.transport else "no",
+                        self.active_endpoint or "none",
+                        redact_url(self.build_glove_ws_url(self.active_endpoint)) if self.active_endpoint else "none",
+                    )
+                )
             return False
 
     async def network_task(self):
@@ -117,6 +182,7 @@ class RuntimeApp:
         last_metrics_ms = 0
         last_action_ms = 0
         last_config_refresh_ms = 0
+        last_heartbeat_ms = 0
         pending_metrics_sent_at = None
 
         while True:
@@ -130,14 +196,23 @@ class RuntimeApp:
                     continue
 
                 ws_url = self.build_glove_ws_url(self.active_endpoint)
+                if self.ws_debug.enabled():
+                    print("[DEBUG][ws] connecting endpoint={} ws_url={}".format(
+                        self.active_endpoint,
+                        redact_url(ws_url),
+                    ))
                 self.transport = SimpleWebSocketClient(ws_url, ca_der_path=self.ca_der_path)
                 self.transport.connect()
+                if self.ws_debug.enabled():
+                    print("[DEBUG][ws] connected; sending hello gloveId={}".format(self.glove_id))
                 self.transport.send_json({
                     "type": "hello",
                     "gloveId": self.glove_id,
                     "ts": time.ticks_ms(),
                 })
                 self.set_connection(True, "READY")
+                if self.ws_debug.enabled():
+                    print("[DEBUG][ws] ready route={} endpoint={}".format(self.status.route, self.active_endpoint))
                 reconnect_delay_ms = 500
             except Exception as exc:
                 print("WebSocket connection failed:", repr(exc))
@@ -146,6 +221,15 @@ class RuntimeApp:
                 self.active_endpoint = None
                 self.status.update(last_error=str(exc))
                 self.set_connection(False, "OFFLINE")
+                if self.ws_debug.enabled():
+                    print(
+                        "[DEBUG][ws] connect failed type={} error={} next_retry_ms={} failed_count={}".format(
+                            type(exc).__name__,
+                            repr(exc),
+                            reconnect_delay_ms,
+                            self.messages_failed,
+                        )
+                    )
                 await asyncio.sleep_ms(reconnect_delay_ms)
                 reconnect_delay_ms = min(max_delay_ms, reconnect_delay_ms * 2)
                 continue
@@ -154,6 +238,8 @@ class RuntimeApp:
                 try:
                     incoming = self.transport.receive_json(timeout=0.01)
                     if incoming:
+                        if self.ws_debug.enabled():
+                            print("[DEBUG][ws] incoming {}".format(safe_json(incoming)))
                         if incoming.get("type") == "passive_metrics_ack" and pending_metrics_sent_at is not None:
                             self.status.update(rtt_ms=time.ticks_diff(time.ticks_ms(), pending_metrics_sent_at))
                             pending_metrics_sent_at = None
@@ -161,11 +247,21 @@ class RuntimeApp:
                         self.handle_server_message(incoming)
 
                     current_ms = time.ticks_ms()
+                    if time.ticks_diff(current_ms, last_heartbeat_ms) >= self.ws_heartbeat_ms:
+                        if not self.send_ws_heartbeat(current_ms):
+                            raise RuntimeError("WebSocket heartbeat failed")
+                        last_heartbeat_ms = current_ms
+
+                    if self.check_action_ack_timeouts(current_ms):
+                        raise RuntimeError("Action ACK timeout")
+
                     if (
                         self.state.mode == "ACTIVE"
                         and time.ticks_diff(current_ms, last_action_ms) >= self.action_send_interval_ms
                     ):
                         for action in self.build_mapped_actions():
+                            if self.action_debug.enabled():
+                                print("[DEBUG][action] mapped from imu {}".format(safe_json(action)))
                             self.send_action(action)
                             last_action_ms = current_ms
 
@@ -175,20 +271,31 @@ class RuntimeApp:
 
                     if time.ticks_diff(current_ms, last_metrics_ms) >= self.metric_interval_sec * 1000:
                         pending_metrics_sent_at = current_ms
-                        self.transport.send_json({
+                        metrics_payload = {
                             "type": "passive_metrics",
                             "gloveId": self.glove_id,
                             "ts": current_ms,
                             "metrics": [self.build_device_metrics()],
-                        })
+                        }
+                        if self.ws_debug.enabled():
+                            print("[DEBUG][ws] sending metrics {}".format(safe_json(metrics_payload)))
+                        self.transport.send_json(metrics_payload)
                         self.messages_sent += 1
                         last_metrics_ms = current_ms
                 except Exception as exc:
-                    print("WebSocket error:", exc)
+                    print("WebSocket error:", repr(exc))
                     self.messages_failed += 1
-                    self.status.update(last_error=str(exc))
-                    self.set_connection(False, "OFFLINE")
+                    self.mark_ws_unhealthy("network_loop", exc)
                     self.active_endpoint = None
+                    if self.ws_debug.enabled():
+                        print(
+                            "[DEBUG][ws] loop error type={} error={} sent={} failed={}".format(
+                                type(exc).__name__,
+                                repr(exc),
+                                self.messages_sent,
+                                self.messages_failed,
+                            )
+                        )
                     try:
                         self.transport.close()
                     except Exception:
@@ -256,12 +363,12 @@ class RuntimeApp:
                         ))
                     self.state.mark_dirty()
                 if not self.wifi_manager.is_connected():
-                    self.status.update(connected=False, route="OFFLINE", last_error="WiFi disconnected")
+                    self.status.update(wifi_connected=False, last_error="WiFi disconnected")
                     self.state.mark_dirty()
                     if self.wifi_debug.enabled():
                         print("[DEBUG][wifi] disconnected; attempting reconnect")
                     if self.wifi_manager.ensure_connected():
-                        self.status.update(wifi_ssid=self.wifi_manager.current_ssid(), last_error="")
+                        self.status.update(wifi_ssid=self.wifi_manager.current_ssid(), wifi_connected=True, last_error="")
                         self.active_endpoint = None
                         self.state.mark_dirty()
                         if self.wifi_debug.enabled():
@@ -272,14 +379,57 @@ class RuntimeApp:
                     elif self.wifi_debug.enabled():
                         print("[DEBUG][wifi] reconnect failed status={}".format(self._wifi_status_code()))
                 else:
-                    self.status.update(wifi_ssid=self.wifi_manager.current_ssid())
+                    self.status.update(wifi_ssid=self.wifi_manager.current_ssid(), wifi_connected=True)
             await asyncio.sleep_ms(15_000)
 
     def handle_server_message(self, message):
         message_type = message.get("type")
+        if self.ws_debug.enabled():
+            print("[DEBUG][ws] handle message type={}".format(message_type or "unknown"))
         if message_type == "request_sensor_snapshot":
             if self.transport:
+                if self.ws_debug.enabled():
+                    print("[DEBUG][ws] sending sensor snapshot")
                 self.transport.send_json(self.build_sensor_snapshot())
+            return
+        if message_type == "mapped_action_ack":
+            action_id = message.get("actionId", "")
+            pending = self.pending_action_acks.get(action_id)
+            if self.action_debug.enabled():
+                print(
+                    "[DEBUG][action] ack accepted={} actionId={} mappingId={} rtt_ms={}".format(
+                        bool(message.get("accepted", message.get("ok", False))),
+                        action_id,
+                        message.get("mappingId", ""),
+                        time.ticks_diff(time.ticks_ms(), pending.get("sent_at", time.ticks_ms())) if pending else "?",
+                    )
+                )
+            return
+        if message_type == "mapped_action_result":
+            action_id = message.get("actionId", "")
+            pending = self.pending_action_acks.pop(action_id, None)
+            ok = bool(message.get("ok"))
+            if self.action_debug.enabled():
+                print(
+                    "[DEBUG][action] result ok={} actionId={} mappingId={} rtt_ms={} result={}".format(
+                        ok,
+                        action_id,
+                        message.get("mappingId", ""),
+                        time.ticks_diff(time.ticks_ms(), pending.get("sent_at", time.ticks_ms())) if pending else "?",
+                        safe_json(message.get("result", {})),
+                    )
+                )
+            if not ok:
+                self.status.update(last_error="Action rejected")
+                self.state.message = "Action rejected"
+                self.state.mark_dirty()
+            return
+        if message_type == "error":
+            if self.action_debug.enabled() or self.ws_debug.enabled():
+                print("[DEBUG][ws] server error {}".format(safe_json(message)))
+            self.status.update(last_error=str(message.get("message", "server error")))
+            self.state.message = "Server error"
+            self.state.mark_dirty()
             return
         if message_type in ("welcome", "config_snapshot", "mode_update"):
             mode = str(message.get("mode", "")).upper()
@@ -303,6 +453,14 @@ class RuntimeApp:
             key = mapping.get("id") or "{}:{}".format(mapping.get("targetDeviceId"), mapping.get("targetCapabilityId"))
             previous = self.last_action_values.get(key)
             if previous is not None and abs(float(mapped_value) - float(previous)) < effective_step(mapping):
+                if self.action_debug.enabled():
+                    print(
+                        "[DEBUG][action] skip mapping={} delta={:.4f} step={:.4f}".format(
+                            key,
+                            abs(float(mapped_value) - float(previous)),
+                            effective_step(mapping),
+                        )
+                    )
                 continue
             self.last_action_values[key] = mapped_value
             actions.append({
@@ -313,6 +471,15 @@ class RuntimeApp:
                 "value": mapped_value,
                 "inputSource": source,
             })
+            if self.action_debug.enabled():
+                print(
+                    "[DEBUG][action] built mapping={} source={} value={} mapped={}".format(
+                        key,
+                        source,
+                        value,
+                        mapped_value,
+                    )
+                )
         return actions
 
     def build_sensor_snapshot(self):
@@ -395,11 +562,17 @@ class RuntimeApp:
         if not self.active_endpoint:
             return False
         try:
+            if self.ws_debug.enabled():
+                print("[DEBUG][ws] refreshing config endpoint={}".format(self.active_endpoint))
             config = self.fetch_json(self.config_url_for_endpoint(self.active_endpoint))
             self.update_runtime_config(config, self.config_source)
+            if self.ws_debug.enabled():
+                print("[DEBUG][ws] refresh config ok")
             return True
         except Exception as exc:
             self.status.update(last_error=str(exc))
+            if self.ws_debug.enabled():
+                print("[DEBUG][ws] refresh config failed {}".format(repr(exc)))
             return False
 
     def update_runtime_config(self, config, source):
@@ -414,6 +587,16 @@ class RuntimeApp:
         self.route_states = config.get("routeStates", [])
         endpoints = config.get("endpoints")
         node_name = first_node_name(endpoints)
+        if self.ws_debug.enabled():
+            print(
+                "[DEBUG][ws] config source={} managers={} devices={} mappings={} endpoints={}".format(
+                    source,
+                    len(self.managers),
+                    len(self.devices),
+                    len(self.mappings),
+                    "yes" if endpoints else "no",
+                )
+            )
         self.status.update(
             node_name=node_name or self.status.node_name,
             route=route_label(self.active_endpoint or self.glove_ws_url, source, self.status.connected),
@@ -426,10 +609,86 @@ class RuntimeApp:
     def set_connection(self, connected, message):
         self.status.update(
             connected=connected,
+            ws_connected=connected,
             route=route_label(self.active_endpoint, self.config_source, connected),
         )
         self.state.message = message
         self.state.mark_dirty()
+        if self.ws_debug.enabled():
+            print(
+                "[DEBUG][ws] connection connected={} message={} route={} endpoint={} last_error={}".format(
+                    connected,
+                    message,
+                    self.status.route,
+                    self.active_endpoint or "none",
+                    self.status.last_error or "none",
+                )
+            )
+
+    def socket_ready(self):
+        return bool(self.transport and self.transport.is_healthy() and self.status.ws_connected)
+
+    def send_ws_heartbeat(self, now):
+        if not self.transport:
+            return False
+        try:
+            self.transport.ping("hb:{}".format(now))
+            if self.ws_debug.enabled():
+                print("[DEBUG][ws] heartbeat ping sent endpoint={}".format(self.active_endpoint or "none"))
+            return True
+        except Exception as exc:
+            self.messages_failed += 1
+            self.mark_ws_unhealthy("heartbeat", exc)
+            if self.ws_debug.enabled():
+                print("[DEBUG][ws] heartbeat failed {}".format(repr(exc)))
+            return False
+
+    def check_action_ack_timeouts(self, now):
+        expired = []
+        for action_id, pending in self.pending_action_acks.items():
+            if time.ticks_diff(now, pending.get("sent_at", now)) > self.action_ack_timeout_ms:
+                expired.append(action_id)
+        for action_id in expired:
+            pending = self.pending_action_acks.pop(action_id, {})
+            action = pending.get("action", {})
+            self.messages_failed += 1
+            self.status.update(last_error="Action ACK timeout")
+            self.state.message = "ACK timeout"
+            self.state.mark_dirty()
+            self.mark_ws_unhealthy("action_ack_timeout", "actionId={}".format(action_id))
+            if self.action_debug.enabled():
+                print(
+                    "[DEBUG][action] ack timeout actionId={} timeout_ms={} {}".format(
+                        action_id,
+                        self.action_ack_timeout_ms,
+                        describe_action(action),
+                    )
+                )
+        return bool(expired)
+
+    def mark_ws_unhealthy(self, reason, exc=None):
+        error_text = repr(exc) if exc is not None else str(reason)
+        if self.transport:
+            try:
+                self.transport.mark_unhealthy(error_text)
+            except Exception:
+                pass
+        self.status.update(
+            connected=False,
+            ws_connected=False,
+            last_error="WSS {}: {}".format(reason, error_text),
+        )
+        self.set_connection(False, "OFFLINE")
+        if self.ws_debug.enabled() or self.action_debug.enabled():
+            print(
+                "[DEBUG][ws] unhealthy reason={} error={} wifi_connected={} wlan_status={} endpoint={}".format(
+                    reason,
+                    error_text,
+                    self.status.wifi_connected,
+                    self._wifi_status_code(),
+                    self.active_endpoint or "none",
+                )
+            )
 
     def build_glove_ws_url(self, base_url=None):
         source_url = base_url or self.glove_ws_url
@@ -552,3 +811,33 @@ def get_wifi_rssi():
     except Exception:
         pass
     return None
+
+
+def safe_json(value):
+    try:
+        return ujson.dumps(value)
+    except Exception:
+        return str(value)
+
+
+def describe_action(action):
+    return "device={} capability={} command={} value={} mapping={}".format(
+        action.get("deviceId", "?"),
+        action.get("capabilityId", "?"),
+        action.get("commandType", "?"),
+        action.get("value", "?"),
+        action.get("mappingId", "?"),
+    )
+
+
+def redact_url(url):
+    text = str(url or "")
+    for token_key in ("api_key=", "token="):
+        index = text.find(token_key)
+        if index >= 0:
+            start = index + len(token_key)
+            end = text.find("&", start)
+            if end < 0:
+                return text[:start] + "<redacted>"
+            return text[:start] + "<redacted>" + text[end:]
+    return text

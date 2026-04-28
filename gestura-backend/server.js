@@ -29,6 +29,7 @@ const { createGlovesRouter } = require('./runtime/routes/gloves');
 const { createTelemetryRouter } = require('./runtime/routes/telemetry');
 const { createSystemRouter } = require('./runtime/routes/system');
 const { createGloveSocketHub } = require('./runtime/ws/gloveSocket');
+const { createStatusSocketHub } = require('./runtime/ws/statusSocket');
 const { registerNodeAgentSocket } = require('./runtime/ws/nodeAgentSocket');
 const { normalizeSensorPayload } = require('./runtime/utils');
 
@@ -107,6 +108,7 @@ const gloveConfigService = new GloveConfigService({
 });
 const authService = new AuthService();
 let gloveSocketHub = null;
+let statusSocketHub = null;
 
 let currentMode = 'passive';
 
@@ -119,6 +121,7 @@ function setMode(mode, source = 'api') {
   currentMode = normalizedMode;
   console.log(`[Mode] ${source} set mode to ${currentMode}`);
   io.emit('modeUpdate', currentMode);
+  statusSocketHub?.broadcast('status.patch', { mode: currentMode });
   gloveSocketHub?.broadcastModeUpdate(currentMode);
   void telemetryService.ingestBatch([
     {
@@ -136,6 +139,7 @@ async function handleSensorUpdate(data, source = 'unknown') {
     source,
   };
   io.emit('sensorData', latest);
+  statusSocketHub?.broadcast('device.state', { sensorData: latest });
   return latest;
 }
 
@@ -145,7 +149,8 @@ function publicStatus() {
     mode: currentMode,
     system,
     realtime: {
-      dashboardSocketPath: '/',
+      dashboardSocketPath: '/api/ws/status',
+      commandSocketPath: '/',
       gloveSocketPath: '/glove',
     },
     managers: managerService.getInfos(),
@@ -178,6 +183,7 @@ function systemStatus() {
       online: true,
       connectedNodeCount: io.of('/nodes').sockets.size,
       connectedDashboardCount: io.of('/').sockets.size,
+      connectedStatusClientCount: statusSocketHub?.getClientCount?.() || 0,
       connectedGloveCount: gloveSocketHub?.getClientCount?.() || 0,
     },
     inventory: {
@@ -275,6 +281,13 @@ app.use('/api/route-metrics', authService.requireDashboardAuth(), createRouteMet
 app.use('/api/telemetry', authService.requireDashboardAuth(), createTelemetryRouter(services));
 app.use('/api/system', authService.requireDashboardAuth(), createSystemRouter(services));
 app.use('/api/gloves', authService.requireDashboardOrPicoToken(), createGlovesRouter(services));
+statusSocketHub = createStatusSocketHub({
+  server,
+  authService,
+  getSnapshot: publicStatus,
+});
+services.statusSocketHub = statusSocketHub;
+app.locals.statusSocketHub = statusSocketHub;
 registerNodeAgentSocket(io, services);
 gloveSocketHub = createGloveSocketHub({
   server,
@@ -349,6 +362,7 @@ async function start() {
   server.listen(PORT, () => {
     console.log(`[Server] Gestura backend on http://localhost:${PORT}`);
     console.log(`[Server] Glove websocket endpoint: ws://localhost:${PORT}/glove`);
+    console.log(`[Server] Dashboard status websocket endpoint: ws://localhost:${PORT}/api/ws/status`);
   });
 }
 

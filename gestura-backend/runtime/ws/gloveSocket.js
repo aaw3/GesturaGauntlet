@@ -39,6 +39,7 @@ function createGloveSocketHub({
 
   wss.on('connection', (ws) => {
     clients.add(ws);
+    ws.isAlive = true;
     send(ws, {
       type: 'welcome',
       gloveId: ws.gloveId,
@@ -71,15 +72,29 @@ function createGloveSocketHub({
 
         if (payload.type === 'mapped_action') {
           const action = payload.action || payload;
-          const result = await actionRouter.execute(action);
           send(ws, {
             type: 'mapped_action_ack',
             gloveId: ws.gloveId,
             ts: Date.now(),
+            actionId: payload.actionId,
+            mappingId: action.mappingId,
+            accepted: true,
+          });
+          const result = await actionRouter.execute(action);
+          send(ws, {
+            type: 'mapped_action_result',
+            gloveId: ws.gloveId,
+            ts: Date.now(),
+            actionId: payload.actionId,
             mappingId: action.mappingId,
             ok: Boolean(result?.ok),
             result,
           });
+          return;
+        }
+
+        if (payload.type === 'ping') {
+          send(ws, { type: 'pong', gloveId: ws.gloveId, ts: Date.now(), echo: payload.ts });
           return;
         }
 
@@ -126,7 +141,29 @@ function createGloveSocketHub({
     ws.on('close', () => {
       clients.delete(ws);
     });
+
+    ws.on('pong', () => {
+      ws.isAlive = true;
+    });
   });
+
+  const heartbeat = setInterval(() => {
+    for (const ws of clients) {
+      if (ws.isAlive === false) {
+        ws.terminate();
+        clients.delete(ws);
+        continue;
+      }
+      ws.isAlive = false;
+      try {
+        ws.ping();
+      } catch {
+        ws.terminate();
+        clients.delete(ws);
+      }
+    }
+  }, 30000);
+  wss.on('close', () => clearInterval(heartbeat));
 
   return {
     broadcastModeUpdate(mode) {

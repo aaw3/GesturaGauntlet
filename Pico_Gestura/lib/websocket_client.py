@@ -30,6 +30,10 @@ class SimpleWebSocketClient:
         self.ca_der_path = ca_der_path
         self.sock = None
         self.parsed = parse_ws_url(url)
+        self.healthy = False
+        self.last_rx_ms = 0
+        self.last_tx_ms = 0
+        self.last_error = ""
 
     def connect(self):
         if self.parsed["secure"] and ssl is None:
@@ -98,6 +102,9 @@ class SimpleWebSocketClient:
             raise RuntimeError("websocket upgrade failed: {}".format(response.split("\r\n", 1)[0]))
 
         self.sock = sock
+        self.healthy = True
+        self.last_rx_ms = time.ticks_ms()
+        self.last_tx_ms = self.last_rx_ms
         print("[ws] connected successfully")
 
     def close(self):
@@ -111,6 +118,19 @@ class SimpleWebSocketClient:
             except Exception:
                 pass
         self.sock = None
+        self.healthy = False
+
+    def is_healthy(self):
+        return self.sock is not None and self.healthy
+
+    def ping(self, payload=b""):
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        self.send_frame(0x9, payload)
+
+    def mark_unhealthy(self, error=""):
+        self.healthy = False
+        self.last_error = str(error or "")
 
     def send_json(self, payload):
         self.send_text(ujson.dumps(payload))
@@ -141,9 +161,14 @@ class SimpleWebSocketClient:
         for i in range(payload_len):
             masked[i] = payload[i] ^ mask[i % 4]
 
-        self.sock.write(header)
-        if payload_len:
-            self.sock.write(masked)
+        try:
+            self.sock.write(header)
+            if payload_len:
+                self.sock.write(masked)
+            self.last_tx_ms = time.ticks_ms()
+        except Exception as exc:
+            self.mark_unhealthy(repr(exc))
+            raise
 
     def receive_json(self, timeout=0.05):
         message = self.receive_text(timeout=timeout)
@@ -162,12 +187,17 @@ class SimpleWebSocketClient:
             return None
 
         if opcode == 0x1:
+            self.last_rx_ms = time.ticks_ms()
             return payload.decode("utf-8", "ignore")
         if opcode == 0x8:
             self.close()
             return None
         if opcode == 0x9:
+            self.last_rx_ms = time.ticks_ms()
             self.send_frame(0xA, payload)
+            return None
+        if opcode == 0xA:
+            self.last_rx_ms = time.ticks_ms()
             return None
         return None
 
