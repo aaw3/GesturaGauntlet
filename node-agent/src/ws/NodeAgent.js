@@ -279,6 +279,13 @@ class NodeAgent {
     const managerInfo = manager?.getInfo?.() || {};
     const targetUrl = firstInterfaceUrl(managerInfo);
     if (!manager || typeof manager.executeAction !== 'function') {
+      if (this.centralActionFallbackEnabled) {
+        return this.forwardGloveActionToCentral(action, {
+          reason: `Manager ${device.managerId} is not attached`,
+          gloveId: action.gloveId || 'primary_glove',
+          actionId: action.actionId,
+        });
+      }
       return {
         ok: false,
         deviceId: action.deviceId,

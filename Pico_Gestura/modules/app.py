@@ -122,6 +122,7 @@ class RuntimeApp:
         self.last_connection_log = {}
         self.last_log_message = ""
         self.last_log_repeat = 0
+        self.last_failed_action_log_id = ""
 
     def start_background_tasks(self):
         self.background_tasks = [
@@ -263,18 +264,22 @@ class RuntimeApp:
                 print("[DEBUG][action] expired id={} age_ms={}".format(queued.get("id"), age_ms))
             return True
 
+        drop_after_attempt = False
         if self.action_transport == "http":
             ok = self.send_action_http(queued)
+            drop_after_attempt = True
         elif self.action_transport == "ws":
             ok = self.send_action_ws_queued(queued)
         elif self.endpoint_uses_http():
             ok = self.send_action_http(queued)
+            drop_after_attempt = True
         else:
             ok = self.send_action_ws_queued(queued)
             if not ok and self.http_action_fallback:
                 ok = self.send_action_http(queued)
+                drop_after_attempt = True
 
-        if ok:
+        if ok or drop_after_attempt:
             self.action_queue.pop(0)
         else:
             queued["attempts"] = int(queued.get("attempts", 0)) + 1
@@ -340,7 +345,9 @@ class RuntimeApp:
             self.status.update(rtt_ms=time.ticks_diff(time.ticks_ms(), started))
             self.messages_failed += 1
             self.status.update(last_error="HTTP action failed: {}".format(exc), degraded=True)
-            if self.action_debug.should_print():
+            action_id = queued.get("id", "")
+            if action_id != self.last_failed_action_log_id and self.action_debug.should_print():
+                self.last_failed_action_log_id = action_id
                 print("[DEBUG][action] http failed id={} error={}".format(queued.get("id"), repr(exc)))
             return False
 
