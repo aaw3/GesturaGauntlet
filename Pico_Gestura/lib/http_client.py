@@ -19,7 +19,7 @@ def get_json(url, headers=None, ca_der_path=None, timeout=5):
         request_headers[key] = value
     status, body = request("GET", url, headers=request_headers, ca_der_path=ca_der_path, timeout=timeout)
     if status < 200 or status >= 300:
-        raise RuntimeError("GET {} failed with {}".format(url, status))
+        raise RuntimeError("GET {} failed with {}".format(redact_url(url), status))
     return ujson.loads(body)
 
 
@@ -36,7 +36,7 @@ def post_json(url, payload, headers=None, ca_der_path=None, timeout=5):
         timeout=timeout,
     )
     if status < 200 or status >= 300:
-        raise RuntimeError("POST {} failed with {}".format(url, status))
+        raise RuntimeError("POST {} failed with {} {}".format(redact_url(url), status, compact_body(body)))
     return ujson.loads(body) if body else {"ok": True}
 
 
@@ -155,3 +155,23 @@ def read_response(sock):
         body += chunk
 
     return status, body.decode("utf-8")
+
+
+def compact_body(body, limit=160):
+    text = str(body or "").replace("\r", " ").replace("\n", " ")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+def redact_url(url):
+    text = str(url or "")
+    for token_key in ("api_key=", "token="):
+        index = text.find(token_key)
+        if index >= 0:
+            start = index + len(token_key)
+            end = text.find("&", start)
+            if end < 0:
+                return text[:start] + "<redacted>"
+            return text[:start] + "<redacted>" + text[end:]
+    return text

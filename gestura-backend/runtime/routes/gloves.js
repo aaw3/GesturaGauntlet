@@ -52,6 +52,14 @@ function createGlovesRouter({ gloveConfigService, actionRouter, statusSocketHub 
     const actionId = req.body?.actionId;
     try {
       const result = await actionRouter.execute(action);
+      if (result?.ok === false) {
+        logHttpActionFailure({
+          gloveId: req.params.gloveId,
+          actionId,
+          action,
+          result,
+        });
+      }
       statusSocketHub?.broadcast?.('device.state', {
         source: 'glove-http',
         gloveId: req.params.gloveId,
@@ -66,14 +74,36 @@ function createGlovesRouter({ gloveConfigService, actionRouter, statusSocketHub 
         gloveId: req.params.gloveId,
         actionId,
         mappingId: action.mappingId,
+        error: result?.ok === false ? compactError(result) : undefined,
         result,
       });
     } catch (err) {
+      logHttpActionFailure({
+        gloveId: req.params.gloveId,
+        actionId,
+        action,
+        result: {
+          managerId: err.managerId,
+          targetUrl: err.targetUrl,
+          deviceId: err.deviceId,
+          capabilityId: err.capabilityId,
+          upstreamStatus: err.status,
+          upstreamError: err.message,
+        },
+      });
       res.status(err.status || 502).json({
         ok: false,
         gloveId: req.params.gloveId,
         actionId,
-        error: err.message || 'Action failed',
+        error: {
+          message: err.message || 'Action failed',
+          managerId: err.managerId,
+          targetUrl: err.targetUrl,
+          deviceId: err.deviceId || action.deviceId,
+          capabilityId: err.capabilityId || action.capabilityId,
+          upstreamStatus: err.status,
+          upstreamError: err.message,
+        },
         code: err.code || 'ACTION_FAILED',
       });
     }
@@ -83,3 +113,33 @@ function createGlovesRouter({ gloveConfigService, actionRouter, statusSocketHub 
 }
 
 module.exports = { createGlovesRouter };
+
+function compactError(result = {}) {
+  return {
+    message: result.message || result.error || result.upstreamError || 'Action failed',
+    managerId: result.managerId || null,
+    targetUrl: redactUrl(result.targetUrl) || null,
+    deviceId: result.deviceId,
+    capabilityId: result.capabilityId,
+    upstreamStatus: result.upstreamStatus,
+    upstreamError: result.upstreamError || result.error || result.message,
+  };
+}
+
+function redactUrl(url) {
+  return String(url || '').replace(/([?&](?:api_key|token)=)[^&]+/gi, '$1<redacted>');
+}
+
+function logHttpActionFailure({ gloveId, actionId, action, result = {} }) {
+  const details = compactError({
+    ...result,
+    deviceId: result.deviceId || action.deviceId,
+    capabilityId: result.capabilityId || action.capabilityId,
+  });
+  console.warn('[Server] glove HTTP action failed', {
+    gloveId,
+    actionId,
+    mappingId: action.mappingId,
+    ...details,
+  });
+}

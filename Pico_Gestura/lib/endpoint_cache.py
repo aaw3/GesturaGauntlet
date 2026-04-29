@@ -69,12 +69,14 @@ class EndpointCache:
 
 
 def transport_rank(item):
-    url = item.get("url", "")
+    url = item.get("gloveWsUrl") or item.get("url", "")
     kind = item.get("kind", "")
     if url.startswith("wss://"):
         return 0
-    if kind == "lan" and url.startswith("ws://"):
+    if kind == "lan" and item.get("actionHttpUrl"):
         return 1
+    if kind == "lan" and url.startswith("ws://"):
+        return 2
     return 2
 
 

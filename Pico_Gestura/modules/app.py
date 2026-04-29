@@ -70,6 +70,7 @@ class RuntimeApp:
         self.ws_debug = DebugPrinter(debug_config, "ws")
         self.transport = None
         self.active_endpoint = None
+        self.active_interface = None
         self.config_source = "offline"
         self.mappings = []
         self.devices = []
@@ -115,6 +116,9 @@ class RuntimeApp:
             "max_loop_block_ms": 0,
             "last_log_ms": time.ticks_ms(),
         }
+        self.last_connection_log = {}
+        self.last_log_message = ""
+        self.last_log_repeat = 0
 
     def start_background_tasks(self):
         self.background_tasks = [
@@ -168,7 +172,7 @@ class RuntimeApp:
                 "[DEBUG][action] send requested connected={} transport={} endpoint={} route={} action={}".format(
                     self.status.connected,
                     "yes" if self.transport else "no",
-                    self.active_endpoint or "none",
+                    redact_url(self.active_endpoint) if self.active_endpoint else "none",
                     self.status.route,
                     describe_action(action),
                 )
@@ -177,7 +181,7 @@ class RuntimeApp:
             if self.action_debug.enabled():
                 print(
                     "[DEBUG][action] send blocked: ws unhealthy active_endpoint={} ws_connected={} wifi_connected={} last_error={} transport_error={}".format(
-                        self.active_endpoint or "none",
+                        redact_url(self.active_endpoint) if self.active_endpoint else "none",
                         self.status.ws_connected,
                         self.status.wifi_connected,
                         self.status.last_error or "none",
@@ -235,7 +239,7 @@ class RuntimeApp:
                         self.messages_sent,
                         self.messages_failed,
                         "yes" if self.transport else "no",
-                        self.active_endpoint or "none",
+                        redact_url(self.active_endpoint) if self.active_endpoint else "none",
                         redact_url(self.build_glove_ws_url(self.active_endpoint)) if self.active_endpoint else "none",
                     )
                 )
@@ -544,6 +548,7 @@ class RuntimeApp:
                     if connected:
                         self.status.update(wifi_ssid=self.wifi_manager.current_ssid(), wifi_connected=True, last_error="")
                         self.active_endpoint = None
+                        self.active_interface = None
                     self.state.wifi_reconnect_requested = False
                     self.state.mark_dirty()
                 elif self.wifi_manager.override_ssid and self.wifi_manager.current_ssid() != self.wifi_manager.override_ssid:
@@ -551,6 +556,7 @@ class RuntimeApp:
                     if self.wifi_manager.connect_override():
                         self.status.update(wifi_ssid=self.wifi_manager.current_ssid(), wifi_connected=True, last_error="")
                         self.active_endpoint = None
+                        self.active_interface = None
                     self.state.mark_dirty()
                 if self.wifi_debug.should_print():
                     print(
@@ -560,7 +566,7 @@ class RuntimeApp:
                             self.wifi_manager.current_ssid(),
                             self._wifi_ifconfig(),
                             self.status.route,
-                            self.active_endpoint or "none",
+                            redact_url(self.active_endpoint) if self.active_endpoint else "none",
                         )
                     )
                 if self.wifi_manager.scan():
@@ -578,6 +584,7 @@ class RuntimeApp:
                     if self.wifi_manager.ensure_connected():
                         self.status.update(wifi_ssid=self.wifi_manager.current_ssid(), wifi_connected=True, last_error="")
                         self.active_endpoint = None
+                        self.active_interface = None
                         self.state.mark_dirty()
                         if self.wifi_debug.enabled():
                             print("[DEBUG][wifi] reconnect ok ssid={} ip={}".format(
@@ -730,23 +737,22 @@ class RuntimeApp:
 
     def bootstrap_runtime_config(self):
         cache = EndpointCache(self.endpoint_cache_path)
-        if not cache.data.get("nodes"):
-            try:
-                if self.wifi_debug.enabled():
-                    print("[DEBUG][wifi] fetching endpoint metadata {}".format(self.central_glove_api_url("endpoints")))
-                metadata = self.fetch_json(self.central_glove_api_url("endpoints"))
-                cache.update_if_changed(metadata, ca_der_path=self.ca_der_path)
-            except Exception as exc:
-                self.status.update(last_error=str(exc))
-                if self.wifi_debug.enabled():
-                    print("[DEBUG][wifi] endpoint metadata failed: {}".format(exc))
+        try:
+            if self.wifi_debug.enabled():
+                print("[DEBUG][wifi] fetching endpoint metadata {}".format(redact_url(self.central_glove_api_url("endpoints"))))
+            metadata = self.fetch_json(self.central_glove_api_url("endpoints"))
+            cache.update_if_changed(metadata, ca_der_path=self.ca_der_path)
+        except Exception as exc:
+            self.status.update(last_error=str(exc))
+            if self.wifi_debug.enabled():
+                print("[DEBUG][wifi] endpoint metadata failed: {}".format(exc))
 
         attempts = []
         seen = {}
         for interface in cache.interfaces():
             if not is_allowed_endpoint(interface):
                 continue
-            url = self.config_url_for_endpoint(interface.get("url", ""))
+            url = self.config_url_for_interface(interface)
             if not seen.get(url):
                 attempts.append(("edge", url, interface))
                 seen[url] = True
@@ -758,23 +764,27 @@ class RuntimeApp:
         for source, url, interface in attempts:
             try:
                 if self.wifi_debug.enabled():
-                    print("[DEBUG][wifi] config attempt source={} url={}".format(source, url))
+                    print("[DEBUG][wifi] config attempt source={} url={}".format(source, redact_url(url)))
                 config = self.fetch_json(url)
                 endpoints = self.update_runtime_config(config, source)
                 if endpoints:
                     cache.update_if_changed(endpoints, ca_der_path=self.ca_der_path)
                 if interface:
                     cache.set_last_good(interface.get("nodeId", ""))
+                    self.active_interface = interface
                 if self.wifi_debug.enabled():
                     print("[DEBUG][wifi] config ok source={} endpoint={}".format(
                         source,
-                        interface.get("url") if interface else self.glove_ws_url,
+                        redact_url(interface_endpoint(interface)) if interface else redact_url(self.glove_ws_url),
                     ))
-                return interface.get("url") if interface else self.glove_ws_url
+                if interface:
+                    return interface_endpoint(interface)
+                self.active_interface = None
+                return self.glove_ws_url
             except Exception as exc:
                 self.status.update(last_error=str(exc))
                 if self.wifi_debug.enabled():
-                    print("[DEBUG][wifi] config failed source={} url={} error={}".format(source, url, exc))
+                    print("[DEBUG][wifi] config failed source={} url={} error={}".format(source, redact_url(url), exc))
 
         self.update_runtime_config({"mappings": [], "devices": [], "managers": []}, "offline")
         self.runtime_config_loaded = False
@@ -787,8 +797,8 @@ class RuntimeApp:
             return False
         try:
             if self.ws_debug.enabled():
-                print("[DEBUG][ws] refreshing config reason={} endpoint={}".format(reason, self.active_endpoint))
-            config = self.fetch_json(self.config_url_for_endpoint(self.active_endpoint))
+                self.debug_log("[DEBUG][ws] refreshing config reason={} endpoint={}".format(reason, redact_url(self.active_endpoint)))
+            config = self.fetch_json(self.config_url_for_active_endpoint())
             self.update_runtime_config(config, self.config_source)
             if self.ws_debug.enabled():
                 print("[DEBUG][ws] refresh config ok")
@@ -873,29 +883,44 @@ class RuntimeApp:
         return changed
 
     def set_connection(self, connected, message):
+        route = route_label(self.active_endpoint, self.config_source, connected)
         changed = (
             self.status.connected != connected
             or self.status.ws_connected != connected
+            or self.status.route != route
+            or self.last_connection_log.get("endpoint") != self.active_endpoint
+            or self.last_connection_log.get("last_error") != self.status.last_error
             or self.state.message != message
         )
         self.status.update(
             connected=connected,
             ws_connected=connected,
-            route=route_label(self.active_endpoint, self.config_source, connected),
+            route=route,
         )
         self.state.message = message
         if changed:
             self.state.mark_dirty()
-        if self.ws_debug.enabled():
-            print(
-                "[DEBUG][ws] connection connected={} message={} route={} endpoint={} last_error={}".format(
+        now = time.ticks_ms()
+        heartbeat_due = time.ticks_diff(now, self.last_connection_log.get("logged_at", 0)) >= 10_000
+        if self.ws_debug.enabled() and (changed or heartbeat_due):
+            self.debug_log(
+                "[DEBUG][ws] connection event={} connected={} message={} route={} endpoint={} last_error={}".format(
+                    "change" if changed else "heartbeat",
                     connected,
                     message,
                     self.status.route,
-                    self.active_endpoint or "none",
+                    redact_url(self.active_endpoint) if self.active_endpoint else "none",
                     self.status.last_error or "none",
-                )
+                ),
+                force=heartbeat_due and not changed,
             )
+            self.last_connection_log = {
+                "connected": connected,
+                "route": route,
+                "endpoint": self.active_endpoint,
+                "last_error": self.status.last_error,
+                "logged_at": now,
+            }
 
     def socket_ready(self):
         return bool(self.transport and self.transport.is_healthy() and self.status.ws_connected)
@@ -917,6 +942,7 @@ class RuntimeApp:
             else:
                 self.log_config_refetch_reason("no_endpoint")
                 self.active_endpoint = self.glove_ws_url
+                self.active_interface = None
         if not self.active_endpoint:
             return False
         self.close_transport()
@@ -925,7 +951,7 @@ class RuntimeApp:
             if self.ws_debug.enabled() or self.action_debug.enabled():
                 print("[DEBUG][ws] connecting reason={} endpoint={} ws_url={}".format(
                     reason,
-                    self.active_endpoint,
+                    redact_url(self.active_endpoint),
                     redact_url(ws_url),
                 ))
             self.transport = SimpleWebSocketClient(ws_url, timeout=self.ws_connect_timeout_sec, ca_der_path=self.ca_der_path)
@@ -945,7 +971,7 @@ class RuntimeApp:
                 print("[DEBUG][ws] connect ok reason={} route={} endpoint={} passive_metrics=false heartbeat={}".format(
                     reason,
                     self.status.route,
-                    self.active_endpoint,
+                    redact_url(self.active_endpoint),
                     "true" if self.ws_heartbeat_enabled else "false",
                 ))
             return True
@@ -1044,7 +1070,7 @@ class RuntimeApp:
             self.send_ws_ping("hb:{}".format(now), "ping")
             if self.ws_debug.enabled():
                 print("[DEBUG][ws] heartbeat ping sent endpoint={} last_successful_ws_send_ms={}".format(
-                    self.active_endpoint or "none",
+                    redact_url(self.active_endpoint) if self.active_endpoint else "none",
                     self.last_successful_ws_send_ms,
                 ))
             return True
@@ -1225,7 +1251,7 @@ class RuntimeApp:
                     error_text,
                     self.status.wifi_connected,
                     self._wifi_status_code(),
-                    self.active_endpoint or "none",
+                    redact_url(self.active_endpoint) if self.active_endpoint else "none",
                     "true" if recent_activity else "false",
                     self.ws_connect_backoff_ms(),
                     self.last_successful_ws_send_ms,
@@ -1241,7 +1267,7 @@ class RuntimeApp:
                 "[DEBUG][ws] config_refetch_reason={} has_config={} endpoint={} config_hash={} endpoint_hash={}".format(
                     reason,
                     "true" if self.runtime_config_loaded else "false",
-                    self.active_endpoint or "none",
+                    redact_url(self.active_endpoint) if self.active_endpoint else "none",
                     self.runtime_config_hash or "none",
                     self.endpoint_hash or "none",
                 )
@@ -1255,7 +1281,7 @@ class RuntimeApp:
         now = time.ticks_ms()
         if time.ticks_diff(now, self.loop_timing.get("last_log_ms", now)) >= self.timing_log_interval_ms:
             self.loop_timing["last_log_ms"] = now
-            print(
+            self.debug_log(
                 "[TIMING] fsr_loop_ms={} ui_loop_ms={} network_loop_ms={} max_loop_block_ms={}".format(
                     self.loop_timing.get("fsr_loop_ms", 0),
                     self.loop_timing.get("ui_loop_ms", 0),
@@ -1264,6 +1290,18 @@ class RuntimeApp:
                 )
             )
             self.loop_timing["max_loop_block_ms"] = 0
+
+    def debug_log(self, message, force=False):
+        if not force and message == self.last_log_message:
+            self.last_log_repeat += 1
+            if self.last_log_repeat % 25 == 0:
+                print("{} repeated {}x".format(message, self.last_log_repeat))
+            return
+        if self.last_log_repeat:
+            print("{} repeated {}x".format(self.last_log_message, self.last_log_repeat))
+        self.last_log_message = message
+        self.last_log_repeat = 0
+        print(message)
 
     def build_glove_ws_url(self, base_url=None):
         source_url = base_url or self.glove_ws_url
@@ -1311,7 +1349,27 @@ class RuntimeApp:
             http_url = http_url[:-len("/glove")]
         return "{}/api/gloves/{}/config".format(http_url, self.glove_id)
 
+    def config_url_for_interface(self, interface):
+        template = interface.get("configHttpUrl", "")
+        if template:
+            return fill_endpoint_template(template, self.glove_id)
+        return self.config_url_for_endpoint(interface_endpoint(interface))
+
+    def config_url_for_active_endpoint(self):
+        if self.active_interface:
+            return self.config_url_for_interface(self.active_interface)
+        return self.config_url_for_endpoint(self.active_endpoint)
+
     def action_url_for_endpoint(self, endpoint_url, action):
+        if self.active_interface and self.active_interface.get("actionHttpUrl"):
+            return fill_endpoint_template(
+                self.active_interface.get("actionHttpUrl"),
+                self.glove_id,
+                action.get("deviceId", ""),
+                action.get("capabilityId", ""),
+            )
+        if self.active_interface:
+            raise RuntimeError("active edge interface missing actionHttpUrl")
         http_url = ws_to_http_url(endpoint_url).split("?", 1)[0].rstrip("/")
         if http_url.endswith("/glove"):
             http_url = http_url[:-len("/glove")]
@@ -1323,9 +1381,24 @@ class RuntimeApp:
         )
 
 
+def interface_endpoint(interface):
+    return interface.get("gloveWsUrl") or interface.get("url") or interface.get("configHttpUrl") or ""
+
+
+def fill_endpoint_template(template, glove_id, device_id="", capability_id=""):
+    return (
+        str(template or "")
+        .replace(":gloveId", glove_id)
+        .replace(":deviceId", device_id)
+        .replace(":capabilityId", capability_id)
+    )
+
+
 def is_allowed_endpoint(interface):
-    url = interface.get("url", "")
+    url = interface_endpoint(interface)
     kind = interface.get("kind", "")
+    if interface.get("configHttpUrl") and interface.get("actionHttpUrl"):
+        return True
     if url.startswith("wss://") or url.startswith("https://"):
         return True
     return kind == "lan" and (url.startswith("ws://") or url.startswith("http://"))

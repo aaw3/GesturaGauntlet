@@ -196,14 +196,48 @@ function normalizeInterfaces(interfaces = []) {
   for (const item of interfaces) {
     if (!['lan', 'public'].includes(item.kind)) continue;
     for (const url of parseUrlList(item.urls || item.url)) {
+      const urls = endpointUrls({
+        url,
+        gloveWsUrl: item.gloveWsUrl,
+        actionHttpUrl: item.actionHttpUrl,
+        configHttpUrl: item.configHttpUrl,
+      });
       normalized.push({
         kind: item.kind,
-        url,
+        url: urls.gloveWsUrl || urls.configHttpUrl || url,
+        gloveWsUrl: urls.gloveWsUrl,
+        actionHttpUrl: urls.actionHttpUrl,
+        configHttpUrl: urls.configHttpUrl,
         priority: Number(item.priority ?? (item.kind === 'lan' ? 10 : 50)),
       });
     }
   }
   return orderInterfaces(normalized);
+}
+
+function endpointUrls({ url, gloveWsUrl, actionHttpUrl, configHttpUrl }) {
+  const baseUrl = String(url || gloveWsUrl || configHttpUrl || actionHttpUrl || '');
+  const wsUrl = gloveWsUrl || (baseUrl.startsWith('ws://') || baseUrl.startsWith('wss://') ? baseUrl : httpToWs(baseUrl));
+  const httpBase = wsToHttp(configHttpUrl || actionHttpUrl || baseUrl).replace(/\/glove$/, '').replace(/\/$/, '');
+  return {
+    gloveWsUrl: wsUrl || '',
+    actionHttpUrl: actionHttpUrl || (httpBase ? `${httpBase}/api/gloves/:gloveId/actions/:deviceId/:capabilityId` : ''),
+    configHttpUrl: configHttpUrl || (httpBase ? `${httpBase}/api/gloves/:gloveId/config` : ''),
+  };
+}
+
+function wsToHttp(url) {
+  const text = String(url || '');
+  if (text.startsWith('wss://')) return `https://${text.slice('wss://'.length)}`;
+  if (text.startsWith('ws://')) return `http://${text.slice('ws://'.length)}`;
+  return text;
+}
+
+function httpToWs(url) {
+  const text = String(url || '');
+  if (text.startsWith('https://')) return `wss://${text.slice('https://'.length)}`;
+  if (text.startsWith('http://')) return `ws://${text.slice('http://'.length)}`;
+  return text;
 }
 
 function orderInterfaces(interfaces) {

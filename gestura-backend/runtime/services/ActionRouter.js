@@ -12,6 +12,9 @@ class ActionRouter {
         ok: false,
         deviceId: action.deviceId,
         capabilityId: action.capabilityId,
+        managerId: null,
+        targetUrl: null,
+        upstreamError: 'Device not found in registry',
         message: 'Device not found in registry',
       };
     }
@@ -22,6 +25,9 @@ class ActionRouter {
         ok: false,
         deviceId: action.deviceId,
         capabilityId: action.capabilityId,
+        managerId: device.managerId,
+        targetUrl: null,
+        upstreamError: 'Capability not found',
         message: 'Capability not found',
       };
     }
@@ -32,12 +38,16 @@ class ActionRouter {
         ok: false,
         deviceId: action.deviceId,
         capabilityId: action.capabilityId,
+        managerId: device.managerId,
+        targetUrl: null,
+        upstreamError: `Manager ${device.managerId} not found`,
         message: `Manager ${device.managerId} not found`,
       };
     }
 
     const info = typeof manager.getInfo === 'function' ? manager.getInfo() : {};
     const route = chooseRouteKind(info);
+    const targetUrl = firstInterfaceUrl(info);
     const startedAt = Date.now();
     try {
       const result = await manager.executeAction(action);
@@ -56,7 +66,14 @@ class ActionRouter {
         message: result?.message,
         failure_reason: result?.ok ? undefined : result?.message,
       });
-      return result;
+      return {
+        ...result,
+        deviceId: result?.deviceId || action.deviceId,
+        capabilityId: result?.capabilityId || action.capabilityId,
+        managerId: device.managerId,
+        targetUrl,
+        upstreamError: result?.ok === false ? result?.message || result?.error : undefined,
+      };
     } catch (err) {
       this.routeMetricsService?.record?.({
         managerId: device.managerId,
@@ -73,6 +90,10 @@ class ActionRouter {
         message: err.message,
         failure_reason: err.message,
       });
+      err.managerId = device.managerId;
+      err.targetUrl = targetUrl;
+      err.deviceId = action.deviceId;
+      err.capabilityId = action.capabilityId;
       throw err;
     }
   }
@@ -83,6 +104,13 @@ function chooseRouteKind(managerInfo) {
     (left, right) => (left.priority ?? 100) - (right.priority ?? 100)
   )[0];
   return first?.kind || 'public';
+}
+
+function firstInterfaceUrl(managerInfo) {
+  const first = [...(managerInfo.interfaces || [])].sort(
+    (left, right) => (left.priority ?? 100) - (right.priority ?? 100)
+  )[0];
+  return first?.actionHttpUrl || first?.url || null;
 }
 
 module.exports = { ActionRouter };

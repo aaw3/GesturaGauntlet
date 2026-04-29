@@ -13,22 +13,61 @@ function nodeInterfacesFromEnv() {
   const publicUrls = parseUrlList(process.env.NODE_PUBLIC_URLS || process.env.NODE_PUBLIC_URL);
   const lanBasePriority = Number(process.env.NODE_LAN_PRIORITY || 10);
   lanUrls.forEach((url, index) => {
+    const urls = endpointUrls({
+      url,
+      actionHttpUrl: process.env.NODE_LAN_ACTION_HTTP_URL,
+      configHttpUrl: process.env.NODE_LAN_CONFIG_HTTP_URL,
+      gloveWsUrl: process.env.NODE_LAN_GLOVE_WS_URL,
+    });
     interfaces.push({
       kind: 'lan',
-      url,
+      url: urls.gloveWsUrl || url,
+      ...urls,
       priority: lanBasePriority + index,
     });
   });
   const maxLanPriority = interfaces.reduce((max, item) => Math.max(max, item.priority), lanBasePriority);
   const publicBasePriority = Math.max(Number(process.env.NODE_PUBLIC_PRIORITY || 50), maxLanPriority + 1);
   publicUrls.forEach((url, index) => {
+    const urls = endpointUrls({
+      url,
+      actionHttpUrl: process.env.NODE_PUBLIC_ACTION_HTTP_URL,
+      configHttpUrl: process.env.NODE_PUBLIC_CONFIG_HTTP_URL,
+      gloveWsUrl: process.env.NODE_PUBLIC_GLOVE_WS_URL,
+    });
     interfaces.push({
       kind: 'public',
-      url,
+      url: urls.gloveWsUrl || url,
+      ...urls,
       priority: publicBasePriority + index,
     });
   });
   return interfaces;
+}
+
+function endpointUrls({ url, gloveWsUrl, actionHttpUrl, configHttpUrl }) {
+  const baseUrl = String(url || gloveWsUrl || configHttpUrl || actionHttpUrl || '');
+  const wsUrl = gloveWsUrl || (baseUrl.startsWith('ws://') || baseUrl.startsWith('wss://') ? baseUrl : httpToWs(baseUrl));
+  const httpBase = wsToHttp(configHttpUrl || actionHttpUrl || baseUrl).replace(/\/glove$/, '').replace(/\/$/, '');
+  return {
+    gloveWsUrl: wsUrl || '',
+    actionHttpUrl: actionHttpUrl || (httpBase ? `${httpBase}/api/gloves/:gloveId/actions/:deviceId/:capabilityId` : ''),
+    configHttpUrl: configHttpUrl || (httpBase ? `${httpBase}/api/gloves/:gloveId/config` : ''),
+  };
+}
+
+function wsToHttp(url) {
+  const text = String(url || '');
+  if (text.startsWith('wss://')) return `https://${text.slice('wss://'.length)}`;
+  if (text.startsWith('ws://')) return `http://${text.slice('ws://'.length)}`;
+  return text;
+}
+
+function httpToWs(url) {
+  const text = String(url || '');
+  if (text.startsWith('https://')) return `wss://${text.slice('https://'.length)}`;
+  if (text.startsWith('http://')) return `ws://${text.slice('http://'.length)}`;
+  return text;
 }
 
 function parseUrlList(value) {

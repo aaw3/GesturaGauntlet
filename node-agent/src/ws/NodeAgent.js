@@ -244,11 +244,29 @@ class NodeAgent {
   async executeGloveAction(action) {
     const device = this.cache.getDeviceById?.(action.deviceId);
     if (!device) {
-      return { ok: false, deviceId: action.deviceId, capabilityId: action.capabilityId, message: 'Device not cached on edge node' };
+      return {
+        ok: false,
+        deviceId: action.deviceId,
+        capabilityId: action.capabilityId,
+        managerId: null,
+        targetUrl: null,
+        upstreamError: 'Device not cached on edge node',
+        message: 'Device not cached on edge node',
+      };
     }
     const manager = this.managers.get(device.managerId);
+    const managerInfo = manager?.getInfo?.() || {};
+    const targetUrl = firstInterfaceUrl(managerInfo);
     if (!manager || typeof manager.executeAction !== 'function') {
-      return { ok: false, deviceId: action.deviceId, capabilityId: action.capabilityId, message: `Manager ${device.managerId} is not attached` };
+      return {
+        ok: false,
+        deviceId: action.deviceId,
+        capabilityId: action.capabilityId,
+        managerId: device.managerId,
+        targetUrl,
+        upstreamError: `Manager ${device.managerId} is not attached`,
+        message: `Manager ${device.managerId} is not attached`,
+      };
     }
 
     const startedAt = Date.now();
@@ -273,7 +291,14 @@ class NodeAgent {
           failure_reason: result?.ok ? undefined : result?.message,
         },
       });
-      return result;
+      return {
+        ...result,
+        deviceId: result?.deviceId || action.deviceId,
+        capabilityId: result?.capabilityId || action.capabilityId,
+        managerId: device.managerId,
+        targetUrl,
+        upstreamError: result?.ok === false ? result?.message || result?.error : undefined,
+      };
     } catch (err) {
       this.telemetry.record({
         eventType: 'route_attempt',
@@ -294,7 +319,15 @@ class NodeAgent {
           failure_reason: err.message,
         },
       });
-      return { ok: false, deviceId: action.deviceId, capabilityId: action.capabilityId, message: err.message };
+      return {
+        ok: false,
+        deviceId: action.deviceId,
+        capabilityId: action.capabilityId,
+        managerId: device.managerId,
+        targetUrl,
+        upstreamError: err.message,
+        message: err.message,
+      };
     }
   }
 
@@ -426,3 +459,10 @@ class NodeAgent {
 }
 
 module.exports = { NodeAgent };
+
+function firstInterfaceUrl(managerInfo = {}) {
+  const first = [...(managerInfo.interfaces || [])].sort(
+    (left, right) => (left.priority ?? 100) - (right.priority ?? 100)
+  )[0];
+  return first?.actionHttpUrl || first?.url || null;
+}
