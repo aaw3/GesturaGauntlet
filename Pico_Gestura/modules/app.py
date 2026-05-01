@@ -24,7 +24,7 @@ class RuntimeApp:
         self.glove_id = env.get("GLOVE_ID", "primary_glove")
         self.pico_api_token = env.get("PICO_API_TOKEN", "")
         self.metric_interval_sec = max(15, int(env.get("METRIC_INTERVAL_SEC", "300")))
-        self.action_send_interval_ms = int(env.get("ACTION_SEND_INTERVAL_MS", "30"))
+        self.action_send_interval_ms = int(env.get("ACTION_SEND_INTERVAL_MS", "75"))
         self.ws_heartbeat_enabled = env_bool(env.get("WS_HEARTBEAT_ENABLED", "false"))
         self.ws_heartbeat_ms = int(env.get("WS_HEARTBEAT_MS", "20000"))
         self.ws_first_heartbeat_delay_ms = int(env.get("WS_FIRST_HEARTBEAT_DELAY_MS", "30000"))
@@ -49,12 +49,7 @@ class RuntimeApp:
         self.action_queue_timeout_ms = int(env.get("ACTION_QUEUE_TIMEOUT_MS", "8000"))
         self.action_transport = str(env.get("PICO_ACTION_TRANSPORT", "auto") or "auto").lower()
         self.http_action_fallback = env_bool(env.get("PICO_HTTP_ACTION_FALLBACK", "true"))
-        self.http_action_timeout = float(env.get("PICO_HTTP_ACTION_TIMEOUT_SEC", "3"))
-        self.https_action_timeout = float(env.get("PICO_HTTPS_ACTION_TIMEOUT_SEC", "5"))
-        self.http_action_async = env_bool(env.get("PICO_HTTP_ACTION_ASYNC", "true"))
-        self.http_action_downgrade_tls = env_bool(env.get("PICO_HTTP_ACTION_DOWNGRADE_TLS", "false"))
-        self.continuous_roll_requires_fsr = env_bool(env.get("CONTINUOUS_ROLL_REQUIRES_FSR", "true"))
-        self.continuous_roll_fsr_source = str(env.get("CONTINUOUS_ROLL_FSR_SOURCE", "any") or "any").lower()
+        self.http_action_timeout = float(env.get("PICO_HTTP_ACTION_TIMEOUT_SEC", "1.0"))
         self.timing_log_interval_ms = int(env.get("TIMING_LOG_INTERVAL_MS", "5000"))
         self.endpoint_cache_path = env.get("ENDPOINT_CACHE_PATH", "endpoint_cache.json")
         self.ca_der_path = env.get("CA_DER_PATH", "")
@@ -75,7 +70,6 @@ class RuntimeApp:
         self.imu_debug = DebugPrinter(env.get("DEBUG_CONFIG"), "imu")
         self.wifi_debug = DebugPrinter(debug_config, "wifi")
         self.action_debug = DebugPrinter(debug_config, "action")
-        self.roll_debug = DebugPrinter(debug_config, "roll")
         self.ws_debug = DebugPrinter(debug_config, "ws")
         self.transport = None
         self.active_endpoint = None
@@ -169,18 +163,6 @@ class RuntimeApp:
                             describe_action(action),
                         ))
                     return True
-            if is_continuous_action(action):
-                retained = []
-                for queued in self.action_queue:
-                    queued_action = queued.get("action", {})
-                    if (
-                        is_continuous_action(queued_action)
-                        and queued_action.get("deviceId") == action.get("deviceId")
-                        and queued_action.get("capabilityId") == action.get("capabilityId")
-                    ):
-                        continue
-                    retained.append(queued)
-                self.action_queue = retained
         if len(self.action_queue) >= self.action_queue_max:
             dropped = self.action_queue.pop(0)
             self.messages_failed += 1
@@ -246,7 +228,6 @@ class RuntimeApp:
                 "action": action,
                 "acked": False,
             }
-
             response_ok = self.wait_for_action_response(action_id, self.ws_action_response_timeout_ms)
             if not response_ok:
                 self.pending_action_acks.pop(action_id, None)
@@ -351,13 +332,6 @@ class RuntimeApp:
             return False
         started = time.ticks_ms()
         try:
-            action_url = self.action_url_for_endpoint(self.active_endpoint, action)
-            if self.http_action_async:
-                action_url = append_query_param(action_url, "async", "1")
-
-            if self.wifi_manager:
-                self.wifi_manager.prefetch_dns_for_url(action_url)
-
             payload = {
                 "type": "mapped_action",
                 "gloveId": self.glove_id,
@@ -365,18 +339,11 @@ class RuntimeApp:
                 "action": action,
             }
             payload.update(action)
-            timeout = self.action_http_timeout_for_url(action_url)
-            if self.action_debug.enabled():
-                print("[DEBUG][action] http post id={} url={} timeout={}".format(
-                    queued.get("id"),
-                    redact_url(action_url),
-                    timeout,
-                ))
             result = post_json(
-                self.with_pico_auth(action_url),
+                self.with_pico_auth(self.action_url_for_endpoint(self.active_endpoint, action)),
                 payload,
                 ca_der_path=self.ca_der_path,
-                timeout=timeout,
+                timeout=self.http_action_timeout,
             )
             self.status.update(rtt_ms=time.ticks_diff(time.ticks_ms(), started))
             self.messages_sent += 1
@@ -510,9 +477,8 @@ class RuntimeApp:
                         else:
                             last_heartbeat_ms = current_ms
 
-                    # self.check_action_ack_timeouts(current_ms)
-                    # if self.check_action_ack_timeouts(current_ms):
-                    #      raise RuntimeError("Action ACK timeout")
+                    if self.check_action_ack_timeouts(current_ms):
+                        raise RuntimeError("Action ACK timeout")
 
                     if (
                         not self.ws_soak_test
@@ -677,19 +643,21 @@ class RuntimeApp:
             return
         if message_type == "mapped_action_ack":
             action_id = message.get("actionId", "")
-            pending = self.pending_action_acks.pop(action_id, None)
-
+            pending = self.pending_action_acks.get(action_id)
             rtt_ms = None
             if pending is not None:
+                pending["acked"] = True
                 rtt_ms = time.ticks_diff(time.ticks_ms(), pending.get("sent_at", time.ticks_ms()))
                 self.status.update(rtt_ms=rtt_ms)
-
             if self.action_debug.enabled():
-                print("[DEBUG][action] ack accepted={} actionId={} rtt_ms={}".format(
-                    bool(message.get("accepted", message.get("ok", False))),
-                    action_id,
-                    rtt_ms if rtt_ms is not None else "?",
-                ))
+                print(
+                    "[DEBUG][action] ack accepted={} actionId={} mappingId={} rtt_ms={}".format(
+                        bool(message.get("accepted", message.get("ok", False))),
+                        action_id,
+                        message.get("mappingId", ""),
+                        rtt_ms if rtt_ms is not None else "?",
+                    )
+                )
             return
         if message_type == "mapped_action_result":
             action_id = message.get("actionId", "")
@@ -743,27 +711,11 @@ class RuntimeApp:
             sensor_key = mapping_sensor_key(source)
             if not sensor_key:
                 continue
-            key = mapping.get("id") or "{}:{}".format(mapping.get("targetDeviceId"), mapping.get("targetCapabilityId"))
-            if not self.mapping_input_active(source, mapping):
-                self.last_action_values.pop(key, None)
-                self.last_mapping_send_ms.pop(key, None)
+            if not self.mapping_input_active(source):
                 continue
             value = self.sensor.get(sensor_key, 0.0)
             mapped_value = apply_mapping_transform(value, mapping)
-            if self.roll_debug.should_print():
-                print(
-                    "[DEBUG][roll] mapping={} source={} active=true fsr_any={} fsr_top={} fsr_bottom={} roll={:.3f} roll_deg={:.1f} percent={:.3f} mapped={}".format(
-                        key,
-                        source,
-                        self.input_reader.is_pressed("any"),
-                        self.input_reader.is_pressed("top"),
-                        self.input_reader.is_pressed("bottom"),
-                        value,
-                        self.sensor.get("roll_deg", 0.0),
-                        roll_percent_from_value(value, mapping),
-                        mapped_value,
-                    )
-                )
+            key = mapping.get("id") or "{}:{}".format(mapping.get("targetDeviceId"), mapping.get("targetCapabilityId"))
             previous = self.last_action_values.get(key)
             if previous is not None and abs(float(mapped_value) - float(previous)) < effective_step(mapping):
                 if self.action_debug.enabled():
@@ -800,13 +752,11 @@ class RuntimeApp:
                 )
         return actions
 
-    def mapping_input_active(self, source, mapping=None):
+    def mapping_input_active(self, source):
         if source == "top_hold_roll":
-            return self.input_reader.is_pressed("top")
+            return self.input_reader.is_held("top")
         if source == "bottom_hold_roll":
-            return self.input_reader.is_pressed("bottom")
-        if source == "glove.roll" and self.continuous_roll_requires_fsr and is_continuous_mapping(mapping):
-            return self.input_reader.is_pressed(self.continuous_roll_fsr_source)
+            return self.input_reader.is_held("bottom")
         return True
 
     def build_sensor_snapshot(self):
@@ -1168,11 +1118,12 @@ class RuntimeApp:
         if not self.transport:
             return False
         try:
-            self.send_ws_json({
-                "type": "heartbeat",
-                "gloveId": self.glove_id,
-                "ts": now,
-            }, "heartbeat")
+            self.send_ws_ping("hb:{}".format(now), "ping")
+            if self.ws_debug.enabled():
+                print("[DEBUG][ws] heartbeat ping sent endpoint={} last_successful_ws_send_ms={}".format(
+                    redact_url(self.active_endpoint) if self.active_endpoint else "none",
+                    self.last_successful_ws_send_ms,
+                ))
             return True
         except Exception as exc:
             self.messages_failed += 1
@@ -1299,11 +1250,8 @@ class RuntimeApp:
     def check_action_ack_timeouts(self, now):
         expired = []
         for action_id, pending in self.pending_action_acks.items():
-            if pending.get("acked"):
+            if time.ticks_diff(now, pending.get("sent_at", now)) > self.action_ack_timeout_ms:
                 expired.append(action_id)
-            elif time.ticks_diff(now, pending.get("sent_at", now)) > self.action_ack_timeout_ms:
-                expired.append(action_id)
-
         for action_id in expired:
             pending = self.pending_action_acks.pop(action_id, {})
             action = pending.get("action", {})
@@ -1311,15 +1259,15 @@ class RuntimeApp:
             self.status.update(last_error="Action ACK timeout")
             self.state.message = "ACK timeout"
             self.state.mark_dirty()
-
-            # DO NOT mark websocket unhealthy here.
+            self.mark_ws_unhealthy("action_ack_timeout", "actionId={}".format(action_id))
             if self.action_debug.enabled():
-                print("[DEBUG][action] ack timeout actionId={} timeout_ms={} {}".format(
-                    action_id,
-                    self.action_ack_timeout_ms,
-                    describe_action(action),
-                ))
-
+                print(
+                    "[DEBUG][action] ack timeout actionId={} timeout_ms={} {}".format(
+                        action_id,
+                        self.action_ack_timeout_ms,
+                        describe_action(action),
+                    )
+                )
         return bool(expired)
 
     def mark_ws_unhealthy(self, reason, exc=None):
@@ -1422,8 +1370,7 @@ class RuntimeApp:
         return "{}{}api_key={}".format(url, separator, self.pico_api_token)
 
     def fetch_json(self, url):
-        timeout = 15 if url.startswith("https://") else 5
-        return get_json(self.with_pico_auth(url), ca_der_path=self.ca_der_path, timeout=timeout)
+        return get_json(self.with_pico_auth(url), ca_der_path=self.ca_der_path)
 
     def endpoint_uses_http(self):
         endpoint = self.active_endpoint or self.glove_ws_url
@@ -1466,22 +1413,17 @@ class RuntimeApp:
 
     def action_url_for_endpoint(self, endpoint_url, action):
         if self.active_interface and self.active_interface.get("actionHttpUrl"):
-            action_url = fill_endpoint_template(
+            return fill_endpoint_template(
                 self.active_interface.get("actionHttpUrl"),
                 self.glove_id,
                 action.get("deviceId", ""),
                 action.get("capabilityId", ""),
             )
-            if self.action_transport == "http" and self.http_action_downgrade_tls and action_url.startswith("https://"):
-                action_url = "http://" + action_url[len("https://"):]
-            return action_url
         if self.active_interface:
             raise RuntimeError("active edge interface missing actionHttpUrl")
         http_url = ws_to_http_url(endpoint_url).split("?", 1)[0].rstrip("/")
         if http_url.endswith("/glove"):
             http_url = http_url[:-len("/glove")]
-        if self.action_transport == "http" and self.http_action_downgrade_tls and http_url.startswith("https://"):
-            http_url = "http://" + http_url[len("https://"):]
         return "{}/api/gloves/{}/actions/{}/{}".format(
             http_url,
             self.glove_id,
@@ -1489,19 +1431,9 @@ class RuntimeApp:
             action.get("capabilityId", ""),
         )
 
-    def action_http_timeout_for_url(self, url):
-        if str(url or "").startswith("https://"):
-            return max(self.http_action_timeout, self.https_action_timeout)
-        return self.http_action_timeout
-
 
 def interface_endpoint(interface):
     return interface.get("gloveWsUrl") or interface.get("url") or interface.get("configHttpUrl") or ""
-
-
-def append_query_param(url, key, value):
-    separator = "&" if "?" in str(url or "") else "?"
-    return "{}{}{}={}".format(url, separator, key, value)
 
 
 def fill_endpoint_template(template, glove_id, device_id="", capability_id=""):
@@ -1554,15 +1486,6 @@ def command_type_for_mapping(mapping):
     return "set"
 
 
-def is_continuous_mapping(mapping):
-    mode = str((mapping or {}).get("mode", "")).lower()
-    return mode.startswith("continuous")
-
-
-def is_continuous_action(action):
-    return str((action or {}).get("inputSource", "")) in ("glove.roll", "glove.pitch", "top_hold_roll", "bottom_hold_roll")
-
-
 def mapping_sensor_key(source):
     if source in ("glove.roll", "top_hold_roll", "bottom_hold_roll"):
         return "roll"
@@ -1572,19 +1495,9 @@ def mapping_sensor_key(source):
 
 
 def apply_mapping_transform(value, mapping):
-    percent = roll_percent_from_value(value, mapping)
     transform = mapping.get("transform", {}) or {}
     minimum = float(transform.get("min", 0))
     maximum = float(transform.get("max", 100))
-    mapped = minimum + (percent * (maximum - minimum))
-    step = float(transform.get("step", 0) or 0)
-    if step > 0:
-        mapped = round(mapped / step) * step
-    return max(minimum, min(maximum, mapped))
-
-
-def roll_percent_from_value(value, mapping):
-    transform = (mapping or {}).get("transform", {}) or {}
     deadzone = abs(float(transform.get("deadzone", 0)))
     offset = float(transform.get("offset", 0))
     if abs(float(value)) < deadzone:
@@ -1593,7 +1506,11 @@ def roll_percent_from_value(value, mapping):
     normalized = max(-1, min(1, (float(value) * scale) + offset))
     if transform.get("invert"):
         normalized = -normalized
-    return max(0.0, min(1.0, (float(normalized) + 1.0) / 2.0))
+    mapped = minimum + ((normalized + 1) / 2) * (maximum - minimum)
+    step = float(transform.get("step", 0) or 0)
+    if step > 0:
+        mapped = round(mapped / step) * step
+    return max(minimum, min(maximum, mapped))
 
 
 def effective_step(mapping):
@@ -1609,7 +1526,7 @@ def mapping_min_interval_ms(mapping):
         return interval
     mode = str(mapping.get("mode", "")).lower()
     if mode.startswith("continuous"):
-        return 25
+        return 50
     return 0
 
 

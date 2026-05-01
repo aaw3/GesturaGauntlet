@@ -176,7 +176,11 @@ class SimpleWebSocketClient:
         message = self.receive_text(timeout=timeout)
         if message is None:
             return None
-        return ujson.loads(message)
+        try:
+            return ujson.loads(message)
+        except ValueError as exc:
+            self.last_error = "invalid json websocket text: {}".format(short_text(message))
+            raise exc
 
     def receive_text(self, timeout=0.05):
         if self.sock is None:
@@ -187,7 +191,7 @@ class SimpleWebSocketClient:
         except Exception:
             pass
         try:
-            opcode, payload = self.read_frame()
+            opcode, payload = self.read_message()
         except OSError:
             return None
 
@@ -211,6 +215,7 @@ class SimpleWebSocketClient:
         header = read_exact(self.sock, 2)
         first = header[0]
         second = header[1]
+        fin = (first & 0x80) != 0
         opcode = first & 0x0F
         masked = (second & 0x80) != 0
         payload_len = second & 0x7F
@@ -229,7 +234,34 @@ class SimpleWebSocketClient:
                 unmasked[i] = payload[i] ^ mask[i % 4]
             payload = bytes(unmasked)
 
-        return opcode, payload
+        return fin, opcode, payload
+
+    def read_message(self):
+        fin, opcode, payload = self.read_frame()
+        if opcode not in (0x0, 0x1, 0x2):
+            return opcode, payload
+        if fin:
+            return opcode, payload
+
+        message_opcode = opcode
+        chunks = [payload]
+        while True:
+            fin, opcode, payload = self.read_frame()
+            if opcode == 0x9:
+                self.last_rx_ms = time.ticks_ms()
+                self.send_frame(0xA, payload)
+                continue
+            if opcode == 0xA:
+                self.last_rx_ms = time.ticks_ms()
+                self.last_pong_ms = self.last_rx_ms
+                continue
+            if opcode == 0x8:
+                return opcode, payload
+            if opcode != 0x0:
+                raise OSError("unexpected websocket continuation opcode {}".format(opcode))
+            chunks.append(payload)
+            if fin:
+                return message_opcode, b"".join(chunks)
 
 
 def read_http_response(sock):
@@ -261,6 +293,13 @@ def read_exact(sock, length):
             raise OSError("connection closed")
         data += bytes(buf[:n])
     return data
+
+
+def short_text(value, limit=96):
+    text = str(value or "").replace("\r", "\\r").replace("\n", "\\n")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
 
 
 def random_bytes(length):

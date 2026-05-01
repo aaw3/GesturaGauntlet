@@ -1,4 +1,4 @@
-import { memo, useRef } from "react"
+import { memo, useEffect, useRef, useState } from "react"
 import { useFrame } from "@react-three/fiber"
 import { RoundedBox, Html } from "@react-three/drei"
 import * as THREE from "three"
@@ -13,20 +13,44 @@ export const TV = memo(function TV({
   const glowRef = useRef<THREE.PointLight>(null)
   const currentBrightness = useRef(0)
 
+  const [imgVersion, setImgVersion] = useState(0)
+  const [imgLoaded, setImgLoaded] = useState(false)
+
+  useEffect(() => {
+    if (!isOn) {
+      setImgLoaded(false)
+      return
+    }
+
+    setImgLoaded(false)
+    setImgVersion((version) => version + 1)
+  }, [isOn])
+
   useFrame((state) => {
     const target = isOn ? 0.82 : 0
     currentBrightness.current += (target - currentBrightness.current) * 0.08
 
     if (screenRef.current) {
       const mat = screenRef.current.material as THREE.MeshStandardMaterial
-      mat.emissiveIntensity = currentBrightness.current * 1.5 + Math.sin(state.clock.elapsedTime * 1.6) * 0.04
+      mat.emissiveIntensity =
+        currentBrightness.current * 1.5 +
+        Math.sin(state.clock.elapsedTime * 1.6) * 0.04
     }
-    if (glowRef.current) glowRef.current.intensity = currentBrightness.current * 2.6
+
+    if (glowRef.current) {
+      glowRef.current.intensity = currentBrightness.current * 2.6
+    }
   })
 
   return (
     <group position={[-1.1, 2.05, -5.035]} scale={[1.18, 1.18, 1]}>
-      <pointLight ref={glowRef} position={[0, 0, 0.45]} color="#b03cff" intensity={0} distance={6.6} />
+      <pointLight
+        ref={glowRef}
+        position={[0, 0, 0.45]}
+        color="#b03cff"
+        intensity={0}
+        distance={6.6}
+      />
 
       <RoundedBox args={[4.0, 1.95, 0.08]} radius={0.025} castShadow>
         <meshStandardMaterial color="#080910" roughness={0.24} metalness={0.55} />
@@ -36,41 +60,60 @@ export const TV = memo(function TV({
         <planeGeometry args={[3.75, 1.72]} />
         <meshStandardMaterial
           color={isOn ? "#000000" : "#030306"}
-          emissive={isOn ? "#000000" : "#000000"}
+          emissive="#000000"
           emissiveIntensity={0}
           roughness={0.16}
-          transparent={isOn}
-          opacity={isOn ? 0 : 1}
+          transparent
+          opacity={isOn ? 0.03 : 1}
         />
-        
+
         {isOn && (
           <Html
             transform
-            position={[0, 0, 0.01]}
+            position={[0, 0, 0.12]}
             distanceFactor={4}
             style={{
-              width: '375px',
-              height: '172px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              pointerEvents: 'none',
-              userSelect: 'none',
-              overflow: 'hidden',
+              width: "375px",
+              height: "172px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              pointerEvents: "none",
+              userSelect: "none",
+              overflow: "hidden",
               padding: 0,
               margin: 0,
               lineHeight: 0,
+              background: "#000",
             }}
           >
-            <img 
-              src="/southpark.gif" 
-              alt="TV Content" 
-              style={{ 
-                width: '100%', 
-                height: '100%', 
-                objectFit: 'fill',
-                display: 'block',
-              }} 
+            {!imgLoaded && (
+              <div
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  background: "#000",
+                }}
+              />
+            )}
+
+            <img
+              key={imgVersion}
+              src={`/southpark.gif?v=${imgVersion}`}
+              alt=""
+              onLoad={() => setImgLoaded(true)}
+              onError={() => {
+                setImgLoaded(false)
+                window.setTimeout(() => {
+                  setImgVersion((version) => version + 1)
+                }, 250)
+              }}
+              style={{
+                width: "100%",
+                height: "100%",
+                objectFit: "fill",
+                display: imgLoaded ? "block" : "none",
+              }}
             />
           </Html>
         )}
