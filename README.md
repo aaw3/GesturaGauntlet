@@ -22,6 +22,16 @@ The system operates in two main modes:
 
 *(Instructions for flashing the Pico W, starting the Node server, and running the React dashboard will be added as the project develops during the sprint).*
 
+Pico debug logging can be enabled in `Pico_Gestura/.env`:
+
+```
+DEBUG=true
+DEBUG_LIST=fsr
+DEBUG_INTERVAL_MS=500
+```
+
+Use `DEBUG_LIST=fsr`, `DEBUG_LIST=imu`, `DEBUG_LIST=fsr,imu`, or `DEBUG_LIST=all` to choose which Pico sensor inputs print to the serial console.
+
 OLED Pin OUT:
 Wiring Instructions:
 
@@ -36,4 +46,3 @@ SDA ➔ GP4 (Pico Physical Pin 6) - Yellow Wire
 
 Goals: use the pressure sensor as a selector for which device to use by cycling through as awell as going into and out of active mode (double Click)
 OR if we squeeze above a certian pressure it will go to active mode, lighter pressure will be passive mode
-
