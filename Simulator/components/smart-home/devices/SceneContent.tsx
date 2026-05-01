@@ -34,9 +34,9 @@ export const SceneContent = memo(function SceneContent(props: SmartHomeSceneProp
     <>
       <color attach="background" args={["#171925"]} />
       <fog attach="fog" args={["#171925", 15, 30]} />
-      <hemisphereLight args={["#ffe7c8", "#37314d", 1.05]} />
-      <ambientLight intensity={0.42} />
-      <directionalLight position={[4, 6.4, 4.5]} intensity={0.45} castShadow shadow-mapSize={[1536, 1536]} />
+      <hemisphereLight args={["#ffe7c8", "#37314d", 1.18]} />
+      <ambientLight intensity={0.7} />
+      <directionalLight position={[4, 6.4, 4.5]} intensity={0.52} castShadow shadow-mapSize={[1536, 1536]} />
 
       <Room
         cornerLedColor={cornerLedColor}
@@ -64,7 +64,7 @@ export const SceneContent = memo(function SceneContent(props: SmartHomeSceneProp
 
       <ContactShadows
         position={[0, 0.025, 0]}
-        opacity={0.36}
+        opacity={0.3}
         scale={10}
         blur={2.4}
         far={5}

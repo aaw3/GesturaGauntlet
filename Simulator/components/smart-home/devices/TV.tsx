@@ -47,7 +47,7 @@ export const TV = memo(function TV({
           <Html
             transform
             position={[0, 0, 0.01]}
-            distanceFactor={2.2}
+            distanceFactor={4}
             style={{
               width: '375px',
               height: '172px',
@@ -56,8 +56,10 @@ export const TV = memo(function TV({
               justifyContent: 'center',
               pointerEvents: 'none',
               userSelect: 'none',
+              overflow: 'hidden',
               padding: 0,
               margin: 0,
+              lineHeight: 0,
             }}
           >
             <img 
