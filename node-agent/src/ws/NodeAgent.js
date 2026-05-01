@@ -200,6 +200,20 @@ class NodeAgent {
 
     try {
       const startedAt = Date.now();
+      let callArgument = argument;
+      if (method === 'executeAction') {
+        const device = this.cache.getDeviceById?.(argument?.deviceId);
+        if (device) {
+          callArgument = {
+            ...argument,
+            device,
+            metadata: {
+              ...(device.metadata || {}),
+              ...(argument?.metadata || {}),
+            },
+          };
+        }
+      }
       if (method === 'discover') {
         this.telemetry.record({
           eventType: 'discovery_started',
@@ -207,7 +221,7 @@ class NodeAgent {
           payload: { managerId: payload.managerId, nodeId: this.node.id },
         });
       }
-      const data = await manager[method](argument);
+      const data = await manager[method](callArgument);
       if (method === 'discover') {
         const refreshedDevices = await manager.listDevices();
         await this.updateManagerInventory(payload.managerId, refreshedDevices);

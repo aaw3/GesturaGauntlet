@@ -1,6 +1,11 @@
 import ujson
 import usocket
 
+try:
+    import urequests
+except ImportError:
+    urequests = None
+
 
 try:
     import ssl
@@ -14,7 +19,7 @@ from lib.env import parse_ws_url
 
 
 def get_json(url, headers=None, ca_der_path=None, timeout=5):
-    request_headers = {"Accept": "application/json"}
+    request_headers = {"Accept": "application/json", "Connection": "close"}
     for key, value in (headers or {}).items():
         request_headers[key] = value
     status, body = request("GET", url, headers=request_headers, ca_der_path=ca_der_path, timeout=timeout)
@@ -24,7 +29,7 @@ def get_json(url, headers=None, ca_der_path=None, timeout=5):
 
 
 def post_json(url, payload, headers=None, ca_der_path=None, timeout=5):
-    request_headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    request_headers = {"Content-Type": "application/json", "Accept": "application/json", "Connection": "close"}
     for key, value in (headers or {}).items():
         request_headers[key] = value
     status, body = request(
@@ -41,6 +46,38 @@ def post_json(url, payload, headers=None, ca_der_path=None, timeout=5):
 
 
 def request(method, url, body=None, headers=None, ca_der_path=None, timeout=5):
+    if urequests is not None:
+        return request_with_urequests(method, url, body=body, headers=headers, timeout=timeout)
+    return request_with_socket(method, url, body=body, headers=headers, ca_der_path=ca_der_path, timeout=timeout)
+
+def request_with_urequests(method, url, body=None, headers=None, timeout=5):
+    import gc
+    response = None
+    try:
+        kwargs = {
+            "headers": headers or {},
+            "data": body,
+            "timeout": timeout,
+        }
+        if method == "GET":
+            kwargs.pop("data", None)
+            response = urequests.get(url, **kwargs)
+        elif method == "POST":
+            response = urequests.post(url, **kwargs)
+        else:
+            raise ValueError("Unsupported HTTP method: {}".format(method))
+        return response.status_code, response.text
+    finally:
+        try:
+            if response:
+                response.close()
+        except Exception:
+            pass
+        response = None
+        gc.collect()
+
+
+def request_with_socket(method, url, body=None, headers=None, ca_der_path=None, timeout=5):
     parsed = parse_http_url(url)
     sock = open_socket(parsed, ca_der_path=ca_der_path, timeout=timeout)
     try:
@@ -89,13 +126,18 @@ def open_socket(parsed, ca_der_path=None, timeout=5):
         if not parsed["secure"]:
             return raw_sock
 
-        # NOTE: MicroPython often has limited SSL support.
-        # Avoid advanced kwargs like cadata/cert_reqs unless you know they're supported.
         try:
-            return ssl.wrap_socket(raw_sock, server_hostname=parsed["host"])
+            wrapped = ssl.wrap_socket(raw_sock, server_hostname=parsed["host"])
         except TypeError:
-            # server_hostname not supported
-            return ssl.wrap_socket(raw_sock)
+            wrapped = ssl.wrap_socket(raw_sock)
+
+        # Re-apply timeout on the wrapped socket — TLS handshake may have reset it
+        try:
+            wrapped.settimeout(timeout)
+        except Exception:
+            pass
+
+        return wrapped
 
     except Exception:
         raw_sock.close()

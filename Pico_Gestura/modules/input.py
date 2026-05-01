@@ -30,6 +30,15 @@ class FSRInputReader:
             return self.bottom.is_held()
         return False
 
+    def is_pressed(self, source):
+        if source == "top":
+            return self.top.is_pressed()
+        if source == "bottom":
+            return self.bottom.is_pressed()
+        if source == "any":
+            return self.top.is_pressed() or self.bottom.is_pressed()
+        return False
+
     def debug_snapshot(self):
         return {
             "top": self.top.debug_snapshot(),
@@ -101,6 +110,9 @@ class ChannelState:
 
     def is_held(self):
         return bool(self.is_down and self.hold_active)
+
+    def is_pressed(self):
+        return bool(self.is_down)
 
     def debug_snapshot(self):
         try:

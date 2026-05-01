@@ -178,8 +178,13 @@ class KasaManager {
   }
 
   async executeAction(action) {
-    const managed = await this.getDevice(action.deviceId);
-    const raw = this.rawDevices.get(action.deviceId);
+    let managed = await this.getDevice(action.deviceId);
+    let raw = this.rawDevices.get(action.deviceId);
+    if (!managed || !raw) {
+      const hydrated = await this.hydrateDeviceForAction(action);
+      managed = hydrated.managed || managed;
+      raw = hydrated.raw || raw;
+    }
     if (!managed || !raw) {
       return {
         ok: false,
@@ -194,6 +199,39 @@ class KasaManager {
     if (!validation.ok) return validation;
 
     return this.queueForDevice(action.deviceId, () => this.applyAction(raw, managed, action));
+  }
+
+  async hydrateDeviceForAction(action) {
+    const metadata = action.metadata || action.device?.metadata || {};
+    const host = metadata.host;
+    if (!host) {
+      await this.discoverDevices();
+      return {
+        managed: this.managedDevices.get(action.deviceId) || null,
+        raw: this.rawDevices.get(action.deviceId) || null,
+      };
+    }
+
+    try {
+      const raw = await this.client.getDevice({
+        host,
+        port: Number(metadata.port || 9999),
+      });
+      const managed = {
+        ...(action.device || mapKasaDevice(this.id, raw)),
+        id: action.deviceId,
+        managerId: this.id,
+      };
+      this.rawDevices.set(action.deviceId, raw);
+      this.managedDevices.set(action.deviceId, managed);
+      return { managed, raw };
+    } catch {
+      await this.discoverDevices();
+      return {
+        managed: this.managedDevices.get(action.deviceId) || null,
+        raw: this.rawDevices.get(action.deviceId) || null,
+      };
+    }
   }
 
   async discover() {

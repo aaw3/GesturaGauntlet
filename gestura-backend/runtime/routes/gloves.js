@@ -68,24 +68,48 @@ function createGlovesRouter({ gloveConfigService, actionRouter, statusSocketHub,
       capabilityId: req.params.capabilityId,
     };
     const actionId = req.body?.actionId;
-    try {
-      const result = await actionRouter.execute(action);
-      if (result?.ok === false) {
+
+    if (shouldAckImmediately(req)) {
+      res.status(202).json({
+        ok: true,
+        accepted: true,
+        gloveId: req.params.gloveId,
+        actionId,
+        mappingId: action.mappingId,
+        deviceId: action.deviceId,
+        capabilityId: action.capabilityId,
+      });
+      void executeAndBroadcastAction({
+        actionRouter,
+        statusSocketHub,
+        gloveId: req.params.gloveId,
+        actionId,
+        action,
+      }).catch((err) => {
         logHttpActionFailure({
           gloveId: req.params.gloveId,
           actionId,
           action,
-          result,
+          result: {
+            managerId: err.managerId,
+            targetUrl: err.targetUrl,
+            deviceId: err.deviceId,
+            capabilityId: err.capabilityId,
+            upstreamStatus: err.status,
+            upstreamError: err.message,
+          },
         });
-      }
-      statusSocketHub?.broadcast?.('device.state', {
-        source: 'glove-http',
+      });
+      return;
+    }
+
+    try {
+      const result = await executeAndBroadcastAction({
+        actionRouter,
+        statusSocketHub,
         gloveId: req.params.gloveId,
         actionId,
-        mappingId: action.mappingId,
-        deviceId: result?.deviceId || action.deviceId,
-        capabilityId: result?.capabilityId || action.capabilityId,
-        result,
+        action,
       });
       res.status(result?.ok === false ? 502 : 200).json({
         ok: Boolean(result?.ok),
@@ -131,6 +155,28 @@ function createGlovesRouter({ gloveConfigService, actionRouter, statusSocketHub,
 }
 
 module.exports = { createGlovesRouter };
+
+async function executeAndBroadcastAction({ actionRouter, statusSocketHub, gloveId, actionId, action }) {
+  const result = await actionRouter.execute(action);
+  if (result?.ok === false) {
+    logHttpActionFailure({
+      gloveId,
+      actionId,
+      action,
+      result,
+    });
+  }
+  statusSocketHub?.broadcast?.('device.state', {
+    source: 'glove-http',
+    gloveId,
+    actionId,
+    mappingId: action.mappingId,
+    deviceId: result?.deviceId || action.deviceId,
+    capabilityId: result?.capabilityId || action.capabilityId,
+    result,
+  });
+  return result;
+}
 
 function broadcastConfigUpdate({ gloveId, reason, gloveConfigService, nodeSocketNamespace, statusSocketHub }) {
   const config = gloveConfigService.getConfigSnapshot(gloveId);
@@ -178,4 +224,8 @@ function logHttpActionFailure({ gloveId, actionId, action, result = {} }) {
     mappingId: action.mappingId,
     ...details,
   });
+}
+
+function shouldAckImmediately(req) {
+  return req.query?.async === '1' || req.query?.async === 'true' || req.get('x-gestura-async') === 'true';
 }

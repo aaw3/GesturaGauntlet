@@ -13,7 +13,7 @@ def load_env(filename=".env"):
                     continue
                 if "=" in line:
                     key, value = line.split("=", 1)
-                    value = value.strip()
+                    value = strip_inline_comment(value.strip())
                     # Strip surrounding single/double quotes if present
                     if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
                         value = value[1:-1]
@@ -21,6 +21,29 @@ def load_env(filename=".env"):
     except OSError:
         print(f"Warning: {filename} file not found.")
     return config
+
+
+def strip_inline_comment(value):
+    quote = ""
+    escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if char in ("'", '"'):
+            quote = char
+            continue
+        if char == "#" and (index == 0 or value[index - 1].isspace()):
+            return value[:index].rstrip()
+    return value
+
 
 def parse_ws_url(url):
     if not url:

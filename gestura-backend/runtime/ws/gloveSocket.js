@@ -76,35 +76,34 @@ function createGloveSocketHub({
 
         if (payload.type === 'mapped_action') {
           const action = payload.action || payload;
+          const actionId = payload.actionId || action.actionId;
+          if (!actionId) {
+            send(ws, {
+              type: 'mapped_action_ack',
+              gloveId: ws.gloveId,
+              ts: Date.now(),
+              actionId,
+              mappingId: action.mappingId,
+              ok: false,
+              reason: 'mapped_action missing actionId',
+            });
+            return;
+          }
           send(ws, {
             type: 'mapped_action_ack',
             gloveId: ws.gloveId,
             ts: Date.now(),
-            actionId: payload.actionId,
+            actionId,
             mappingId: action.mappingId,
-            accepted: true,
+            ok: true,
           });
-          const result = await actionRouter.execute(action);
-          const actionResultMessage = {
-            type: 'mapped_action_result',
+          void executeMappedAction({
+            ws,
+            actionRouter,
+            statusSocketHub,
             gloveId: ws.gloveId,
-            ts: Date.now(),
-            actionId: payload.actionId,
-            mappingId: action.mappingId,
-            ok: Boolean(result?.ok),
-            result,
-          };
-          send(ws, {
-            ...actionResultMessage,
-          });
-          statusSocketHub?.broadcast?.('device.state', {
-            source: 'glove',
-            gloveId: ws.gloveId,
-            actionId: payload.actionId,
-            mappingId: action.mappingId,
-            deviceId: result?.deviceId || action.deviceId,
-            capabilityId: result?.capabilityId || action.capabilityId,
-            result,
+            actionId,
+            action,
           });
           return;
         }
@@ -235,6 +234,55 @@ function parse(raw) {
 function send(ws, payload) {
   if (ws.readyState === ws.OPEN) {
     ws.send(JSON.stringify(payload));
+  }
+}
+
+async function executeMappedAction({ ws, actionRouter, statusSocketHub, gloveId, actionId, action }) {
+  try {
+    const result = await actionRouter.execute(action);
+    send(ws, {
+      type: 'mapped_action_result',
+      gloveId,
+      ts: Date.now(),
+      actionId,
+      mappingId: action.mappingId,
+      ok: Boolean(result?.ok),
+      result,
+    });
+    statusSocketHub?.broadcast?.('device.state', {
+      source: 'glove',
+      gloveId,
+      actionId,
+      mappingId: action.mappingId,
+      deviceId: result?.deviceId || action.deviceId,
+      capabilityId: result?.capabilityId || action.capabilityId,
+      result,
+    });
+  } catch (error) {
+    const result = {
+      ok: false,
+      deviceId: action.deviceId,
+      capabilityId: action.capabilityId,
+      message: error instanceof Error ? error.message : 'Mapped action failed',
+    };
+    send(ws, {
+      type: 'mapped_action_result',
+      gloveId,
+      ts: Date.now(),
+      actionId,
+      mappingId: action.mappingId,
+      ok: false,
+      result,
+    });
+    statusSocketHub?.broadcast?.('device.state', {
+      source: 'glove',
+      gloveId,
+      actionId,
+      mappingId: action.mappingId,
+      deviceId: action.deviceId,
+      capabilityId: action.capabilityId,
+      result,
+    });
   }
 }
 

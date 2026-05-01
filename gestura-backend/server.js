@@ -255,6 +255,31 @@ app.post('/api/mode', authService.requireDashboardOrPicoToken(), (req, res) => {
   }
 });
 
+app.get('/api/debug/echo', authService.requireDashboardOrPicoToken(), (req, res) => {
+  res.json({
+    ok: true,
+    method: req.method,
+    path: req.path,
+    query: req.query || {},
+    receivedAt: new Date().toISOString(),
+  });
+});
+
+app.post('/api/debug/echo', authService.requireDashboardOrPicoToken(), (req, res) => {
+  res.json({
+    ok: true,
+    method: req.method,
+    path: req.path,
+    query: req.query || {},
+    body: req.body || {},
+    headers: {
+      contentType: req.get('content-type') || null,
+      userAgent: req.get('user-agent') || null,
+    },
+    receivedAt: new Date().toISOString(),
+  });
+});
+
 const services = {
   managerService,
   deviceRegistry,

@@ -1,8 +1,8 @@
 import network
 import time
 import ujson
-import time
 import ntptime
+import socket
 
 
 class WiFiManager:
@@ -14,7 +14,9 @@ class WiFiManager:
         self.scan_results = []
         self.override_ssid = ""
         self.last_scan_ms = 0
+        self.last_dns_result = None
         self.load()
+
         if fallback_ssid and not self.get_profile(fallback_ssid):
             self.upsert(fallback_ssid, fallback_password, save=False)
 
@@ -56,6 +58,7 @@ class WiFiManager:
         ssid = str(ssid or "").strip()
         if not ssid:
             return False
+
         for profile in self.profiles:
             if profile.get("ssid") == ssid:
                 if profile.get("password", "") == password:
@@ -64,6 +67,7 @@ class WiFiManager:
                 if save:
                     self.save()
                 return True
+
         self.profiles.append({"ssid": ssid, "password": password})
         if save:
             self.save()
@@ -89,6 +93,7 @@ class WiFiManager:
         except Exception as exc:
             print("WiFi scan failed:", exc)
             raw = []
+
         self.scan_results = normalize_scan(raw)
         self.last_scan_ms = time.ticks_ms()
         return self.scan_results
@@ -96,6 +101,7 @@ class WiFiManager:
     def nearby_by_ssid(self):
         if not self.scan_results:
             self.scan()
+
         nearby = {}
         for item in self.scan_results:
             ssid = item.get("ssid")
@@ -103,19 +109,23 @@ class WiFiManager:
                 continue
             if ssid not in nearby or item.get("rssi", -999) > nearby[ssid].get("rssi", -999):
                 nearby[ssid] = item
+
         return nearby
 
     def listed_networks(self):
         nearby = self.nearby_by_ssid()
         items = []
+
         for profile in self.profiles:
             ssid = profile.get("ssid", "")
             detected = ssid in nearby
             label = ssid
+
             if not detected:
                 label = "X " + label
             elif ssid == self.current_ssid():
                 label = "* " + label
+
             items.append({
                 "ssid": ssid,
                 "label": label,
@@ -124,6 +134,7 @@ class WiFiManager:
                 "current": ssid == self.current_ssid(),
                 "override": ssid == self.override_ssid,
             })
+
         return items
 
     def choose_profile(self):
@@ -131,48 +142,66 @@ class WiFiManager:
             profile = self.get_profile(self.override_ssid)
             if profile:
                 return profile
+
         nearby = self.nearby_by_ssid()
         best = None
         best_rssi = -999
+
         for profile in self.profiles:
             ssid = profile.get("ssid")
             rssi = nearby.get(ssid, {}).get("rssi", -999)
             if rssi > best_rssi:
                 best = profile
                 best_rssi = rssi
+
         return best or (self.profiles[0] if self.profiles else None)
 
     def connect_best(self, timeout_sec=15):
         self.scan()
         profile = self.choose_profile()
+
         if not profile:
             raise Exception("No WiFi profiles configured")
+
         return self.connect(profile.get("ssid"), profile.get("password", ""), timeout_sec)
 
     def connect(self, ssid, password="", timeout_sec=15):
         if self.current_ssid() == ssid and self.is_connected():
+            print("[DEBUG][wifi] already connected ifconfig={}".format(self.wlan.ifconfig()))
             return self.wlan.ifconfig()[0]
+
         print("Connecting WiFi:", ssid)
+
         try:
             self.wlan.disconnect()
         except Exception:
             pass
+
         self.wlan.connect(ssid, password)
+
         deadline = time.time() + timeout_sec if hasattr(time, "time") else None
+
         while True:
             status = self.wlan.status()
+
             if status < 0 or status >= 3:
                 break
+
             if deadline is not None and time.time() >= deadline:
                 break
+
             time.sleep(1)
+
         if self.wlan.status() != 3:
             raise Exception("WiFi connection failed: {}".format(ssid))
+
+        print("[DEBUG][wifi] connected ifconfig={}".format(self.wlan.ifconfig()))
         return self.wlan.ifconfig()[0]
 
     def ensure_connected(self):
         if self.is_connected():
             return True
+
         try:
             self.connect_best(timeout_sec=10)
             return True
@@ -183,9 +212,11 @@ class WiFiManager:
     def connect_override(self):
         if not self.override_ssid:
             return self.ensure_connected()
+
         profile = self.get_profile(self.override_ssid)
         if not profile:
             return False
+
         try:
             self.connect(profile.get("ssid"), profile.get("password", ""), timeout_sec=10)
             return True
@@ -205,23 +236,160 @@ class WiFiManager:
         except Exception:
             return ""
 
+    def ifconfig(self):
+        try:
+            return self.wlan.ifconfig()
+        except Exception:
+            return None
+
+    # -------------------------
+    # DNS PREFETCH / DEBUG
+    # -------------------------
+
+    def resolve_host(self, host, port=443):
+        if not host:
+            print("[DEBUG][dns] missing host")
+            return None
+
+        if not self.ensure_connected():
+            print("[DEBUG][dns] wifi not connected")
+            return None
+
+        try:
+            start = time.ticks_ms()
+            info = socket.getaddrinfo(host, port)
+            elapsed = time.ticks_diff(time.ticks_ms(), start)
+
+            ip = info[0][-1][0] if info else None
+
+            self.last_dns_result = {
+                "host": host,
+                "port": port,
+                "ip": ip,
+                "ms": elapsed,
+                "ok": bool(ip),
+            }
+
+            print("[DEBUG][dns] {}:{} -> {} in {}ms".format(host, port, ip, elapsed))
+            return ip
+
+        except Exception as exc:
+            self.last_dns_result = {
+                "host": host,
+                "port": port,
+                "ip": None,
+                "ms": None,
+                "ok": False,
+                "error": str(exc),
+            }
+
+            print("[DEBUG][dns] failed {}:{} error={}".format(host, port, exc))
+            return None
+
+    def prefetch_dns_for_url(self, url, default_port=443):
+        try:
+            host, port = parse_url_host_port(url, default_port)
+            if not host:
+                print("[DEBUG][dns] could not parse url={}".format(url))
+                return None
+
+            return self.resolve_host(host, port)
+
+        except Exception as exc:
+            print("[DEBUG][dns] url parse failed url={} error={}".format(url, exc))
+            return None
+
+    def network_probe(self, host="gestura.aaw3.dev", port=443, timeout_sec=5):
+        print("[DEBUG][probe] start host={} port={}".format(host, port))
+
+        if not self.ensure_connected():
+            print("[DEBUG][probe] wifi not connected")
+            return False
+
+        ip = self.resolve_host(host, port)
+        if not ip:
+            print("[DEBUG][probe] DNS failed")
+            return False
+
+        sock = None
+
+        try:
+            start = time.ticks_ms()
+            sock = socket.socket()
+            sock.settimeout(timeout_sec)
+            sock.connect((ip, port))
+            elapsed = time.ticks_diff(time.ticks_ms(), start)
+
+            print("[DEBUG][probe] TCP OK {}:{} in {}ms".format(ip, port, elapsed))
+            return True
+
+        except Exception as exc:
+            print("[DEBUG][probe] TCP failed {}:{} error={}".format(ip, port, exc))
+            return False
+
+        finally:
+            try:
+                if sock:
+                    sock.close()
+            except Exception:
+                pass
+
+
+def parse_url_host_port(url, default_port=443):
+    value = str(url or "")
+
+    if "://" in value:
+        scheme, rest = value.split("://", 1)
+    else:
+        scheme, rest = "", value
+
+    host_port = rest.split("/", 1)[0]
+
+    if "@" in host_port:
+        host_port = host_port.split("@", 1)[1]
+
+    if ":" in host_port:
+        host, port_text = host_port.rsplit(":", 1)
+        try:
+            port = int(port_text)
+        except Exception:
+            port = default_port
+    else:
+        host = host_port
+
+        if scheme in ("http", "ws"):
+            port = 80
+        elif scheme in ("https", "wss"):
+            port = 443
+        else:
+            port = default_port
+
+    return host, port
+
 
 def normalize_profiles(value):
     profiles = []
+
     if isinstance(value, dict):
         iterable = [{"ssid": ssid, "password": password} for ssid, password in value.items()]
     else:
         iterable = value or []
+
     for item in iterable:
         if isinstance(item, dict):
             ssid = str(item.get("ssid", "")).strip()
             if ssid:
-                profiles.append({"ssid": ssid, "password": str(item.get("password", ""))})
+                profiles.append({
+                    "ssid": ssid,
+                    "password": str(item.get("password", "")),
+                })
+
     return profiles
 
 
 def normalize_scan(raw):
     results = []
+
     for entry in raw or []:
         try:
             ssid = entry[0].decode("utf-8") if hasattr(entry[0], "decode") else str(entry[0])
@@ -235,7 +403,9 @@ def normalize_scan(raw):
             })
         except Exception:
             pass
+
     return results
+
 
 def sync_time_ntp():
     try:

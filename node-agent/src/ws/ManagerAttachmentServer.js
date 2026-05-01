@@ -67,6 +67,41 @@ class ManagerAttachmentServer {
         capabilityId: req.params.capabilityId,
       };
       const actionId = req.body?.actionId;
+
+      if (shouldAckImmediately(req)) {
+        res.status(202).json({
+          ok: true,
+          accepted: true,
+          gloveId: req.params.gloveId,
+          actionId,
+          mappingId: action.mappingId,
+          deviceId: action.deviceId,
+          capabilityId: action.capabilityId,
+        });
+        void this.onGloveAction?.({
+          ...action,
+          gloveId: req.params.gloveId,
+          actionId,
+        }).then((result) => {
+          if (result?.ok === false) {
+            logHttpActionFailure({
+              gloveId: req.params.gloveId,
+              actionId,
+              action,
+              result,
+            });
+          }
+        }).catch((err) => {
+          logHttpActionFailure({
+            gloveId: req.params.gloveId,
+            actionId,
+            action,
+            result: { upstreamError: err.message },
+          });
+        });
+        return;
+      }
+
       try {
         const result = await this.onGloveAction?.({
           ...action,
@@ -214,15 +249,31 @@ class ManagerAttachmentServer {
         if (payload.type === 'mapped_action') {
           const action = payload.action || payload;
           const actionId = payload.actionId || action.actionId;
-          const result = await this.onGloveAction?.(action);
+          if (!actionId) {
+            sendGloveMessage(ws, {
+              type: 'mapped_action_ack',
+              gloveId: ws.gloveId,
+              ts: Date.now(),
+              actionId,
+              mappingId: action.mappingId,
+              ok: false,
+              reason: 'mapped_action missing actionId',
+            });
+            return;
+          }
           sendGloveMessage(ws, {
             type: 'mapped_action_ack',
             gloveId: ws.gloveId,
             ts: Date.now(),
             actionId,
             mappingId: action.mappingId,
-            ok: Boolean(result?.ok),
-            result,
+            ok: true,
+          });
+          void executeGloveWsAction({
+            ws,
+            action,
+            actionId,
+            onGloveAction: this.onGloveAction,
           });
         }
       });
@@ -348,6 +399,36 @@ function parseJson(raw) {
   }
 }
 
+async function executeGloveWsAction({ ws, action, actionId, onGloveAction }) {
+  try {
+    const result = await onGloveAction?.(action);
+    sendGloveMessage(ws, {
+      type: 'mapped_action_result',
+      gloveId: ws.gloveId,
+      ts: Date.now(),
+      actionId,
+      mappingId: action.mappingId,
+      ok: Boolean(result?.ok),
+      result,
+    });
+  } catch (error) {
+    sendGloveMessage(ws, {
+      type: 'mapped_action_result',
+      gloveId: ws.gloveId,
+      ts: Date.now(),
+      actionId,
+      mappingId: action.mappingId,
+      ok: false,
+      result: {
+        ok: false,
+        deviceId: action.deviceId,
+        capabilityId: action.capabilityId,
+        message: error instanceof Error ? error.message : 'Mapped action failed',
+      },
+    });
+  }
+}
+
 function resolveExpectedToken({ id, sharedToken, tokenMap }) {
   const parsedMap = parseTokenMap(tokenMap);
   if (id && parsedMap[id]) return parsedMap[id];
@@ -402,4 +483,8 @@ function logHttpActionFailure({ gloveId, actionId, action, result = {} }) {
     mappingId: action.mappingId,
     ...details,
   });
+}
+
+function shouldAckImmediately(req) {
+  return req.query?.async === '1' || req.query?.async === 'true' || req.get('x-gestura-async') === 'true';
 }
