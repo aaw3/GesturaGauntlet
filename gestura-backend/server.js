@@ -115,6 +115,7 @@ let selectedDeviceId = null;
 let lastGloveState = null;
 let lastMovementTime = Date.now();
 let lastActionTime = 0;
+let smoothedRoll = null;
 
 function setMode(mode, source = 'api') {
   const normalizedMode = String(mode || '').trim().toLowerCase();
@@ -162,21 +163,31 @@ async function handleSensorUpdate(data, source = 'unknown') {
     }
     lastGloveState = latest;
 
-    // Active Mode: Pressure > 10 and Rotate Left 90 degrees -> Dim
-    if (latest.pressure > 10) {
-      // Rotate left 90 degrees (assuming -90 range)
-      if (latest.roll_deg < -70 && latest.roll_deg > -110) {
-        if (now - lastActionTime > 500) { // Throttle
-          console.log(`[KasaGlove] Active mode trigger: Dimming ${selectedDeviceId}`);
-          lastActionTime = now;
-          void actionRouter.execute({
-            deviceId: selectedDeviceId,
-            capabilityId: 'brightness',
-            commandType: 'set',
-            value: 20 // Set to dim level
-          }).catch(err => console.error('[KasaGlove] Dim failed:', err.message));
-        }
+    // LEGACY DIMMING LOGIC (from f1bcffda)
+    // Only allow gyro control if pressure > 15
+    if (latest.pressure > 15) {
+      const alpha = 0.6; // Legacy smoothing
+      smoothedRoll = smoothedRoll === null 
+        ? latest.roll_deg 
+        : smoothedRoll * (1 - alpha) + latest.roll_deg * alpha;
+
+      // Map roll_deg (-90 to 90) to brightness (0 to 100)
+      // Legacy used -1..1 range for 'x' axis, but here we use degrees
+      let brightness = Math.round(((smoothedRoll + 90) / 180) * 100);
+      brightness = Math.max(1, Math.min(100, brightness));
+
+      if (now - lastActionTime > 125) { // Legacy throttle (125ms)
+        console.log(`[KasaGlove] Legacy Dimming: roll=${latest.roll_deg.toFixed(1)} -> brightness=${brightness}%`);
+        lastActionTime = now;
+        void actionRouter.execute({
+          deviceId: selectedDeviceId,
+          capabilityId: 'brightness',
+          commandType: 'set',
+          value: brightness
+        }).catch(err => console.error('[KasaGlove] Legacy Dimming failed:', err.message));
       }
+    } else {
+      smoothedRoll = null; // Reset smoothing when pressure is released
     }
 
     // Passive Mode Testing: 10 seconds inactivity -> Turn Red
