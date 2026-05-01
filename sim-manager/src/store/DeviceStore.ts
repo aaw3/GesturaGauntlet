@@ -19,34 +19,51 @@ export class SimulatorApiError extends Error {
 
 export class DeviceStore {
   readonly simulatorApiUrl: string;
+  readonly managerId?: string;
+  readonly managerName?: string;
 
   constructor(
     simulatorApiUrl =
-      process.env.SIMULATOR_API_URL || process.env.SIMULATOR_URL || "http://localhost:3000",
+      process.env.SIMULATOR_API_URL || process.env.SIMULATOR_URL || "http://localhost:3101",
   ) {
     this.simulatorApiUrl = simulatorApiUrl.replace(/\/+$/, "");
+    this.managerId = process.env.MANAGER_ID || process.env.SIMULATOR_MANAGER_ID;
+    this.managerName = process.env.MANAGER_NAME || process.env.SIMULATOR_MANAGER_NAME;
   }
 
   async getManagerInfo(): Promise<DeviceManagerInfo> {
     const info = await this.fetchJson<DeviceManagerInfo>("/api/manager");
+    const managerId = this.managerId || info.id;
+    const managerName = this.managerName || info.name;
+
     return {
       ...info,
+      id: managerId,
+      name: managerName,
       kind: process.env.MANAGER_KIND || info.kind || "simulator",
       metadata: {
         ...(info.metadata || {}),
-        name: process.env.MANAGER_NAME || info.name,
+        name: managerName,
         description:
           process.env.MANAGER_DESCRIPTION ||
           "Simulator manager attached to a Gestura node agent.",
         iconKey: process.env.MANAGER_ICON_KEY || "cpu",
         colorKey: process.env.MANAGER_COLOR_KEY || "cyan",
+        simulatorManagerId: info.id,
       },
       interfaces: managerInterfacesFromEnv(),
     };
   }
 
   async listDevices(): Promise<SimDevice[]> {
-    return this.fetchJson<SimDevice[]>("/api/devices");
+    const devices = await this.fetchJson<SimDevice[]>("/api/devices");
+    const managerId = this.managerId;
+    if (!managerId) return devices;
+
+    return devices.map((device) => ({
+      ...device,
+      managerId,
+    }));
   }
 
   async getDevice(deviceId: string): Promise<SimDevice | undefined> {
