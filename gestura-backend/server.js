@@ -111,6 +111,10 @@ let gloveSocketHub = null;
 let statusSocketHub = null;
 
 let currentMode = 'passive';
+let selectedDeviceId = null;
+let lastGloveState = null;
+let lastMovementTime = Date.now();
+let lastActionTime = 0;
 
 function setMode(mode, source = 'api') {
   const normalizedMode = String(mode || '').trim().toLowerCase();
@@ -140,6 +144,56 @@ async function handleSensorUpdate(data, source = 'unknown') {
   };
   io.emit('sensorData', latest);
   statusSocketHub?.broadcast('device.state', { sensorData: latest });
+
+  // Check if Kasa light is selected
+  if (selectedDeviceId && (selectedDeviceId.includes('kasa') || selectedDeviceId.includes('bulb'))) {
+    const now = Date.now();
+    
+    // Movement detection
+    const moveThreshold = 2;
+    const moved = lastGloveState && (
+      Math.abs(latest.roll_deg - lastGloveState.roll_deg) > moveThreshold ||
+      Math.abs(latest.pitch_deg - lastGloveState.pitch_deg) > moveThreshold ||
+      Math.abs(latest.pressure - lastGloveState.pressure) > 1
+    );
+
+    if (moved || !lastGloveState) {
+      lastMovementTime = now;
+    }
+    lastGloveState = latest;
+
+    // Active Mode: Pressure > 10 and Rotate Left 90 degrees -> Dim
+    if (latest.pressure > 10) {
+      // Rotate left 90 degrees (assuming -90 range)
+      if (latest.roll_deg < -70 && latest.roll_deg > -110) {
+        if (now - lastActionTime > 500) { // Throttle
+          console.log(`[KasaGlove] Active mode trigger: Dimming ${selectedDeviceId}`);
+          lastActionTime = now;
+          void actionRouter.execute({
+            deviceId: selectedDeviceId,
+            capabilityId: 'brightness',
+            commandType: 'set',
+            value: 20 // Set to dim level
+          }).catch(err => console.error('[KasaGlove] Dim failed:', err.message));
+        }
+      }
+    }
+
+    // Passive Mode Testing: 10 seconds inactivity -> Turn Red
+    if (now - lastMovementTime > 10000) {
+      if (now - lastActionTime > 5000) { // Throttle repeated triggers
+        console.log(`[KasaGlove] Passive mode trigger: Inactivity for 10s. Turning ${selectedDeviceId} RED.`);
+        lastActionTime = now;
+        void actionRouter.execute({
+          deviceId: selectedDeviceId,
+          capabilityId: 'color',
+          commandType: 'set',
+          value: '#FF0000'
+        }).catch(err => console.error('[KasaGlove] Red alert failed:', err.message));
+      }
+    }
+  }
+
   return latest;
 }
 
@@ -253,6 +307,13 @@ app.post('/api/mode', authService.requireDashboardOrPicoToken(), (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
+});
+
+app.post('/api/selection', authService.requireDashboardOrPicoToken(), (req, res) => {
+  const { deviceId } = req.body;
+  selectedDeviceId = deviceId || null;
+  console.log(`[Selection] Updated selectedDeviceId to: ${selectedDeviceId}`);
+  res.json({ ok: true, selectedDeviceId });
 });
 
 const services = {

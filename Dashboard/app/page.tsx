@@ -142,6 +142,21 @@ export default function Dashboard() {
     isSimulatingRef.current = isSimulating;
   }, [isSimulating]);
 
+  useEffect(() => {
+    const notifySelection = async () => {
+      try {
+        await fetch('/api/selection', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceId: selectedDeviceId }),
+        });
+      } catch (err) {
+        console.error('Failed to notify selection:', err);
+      }
+    };
+    notifySelection();
+  }, [selectedDeviceId]);
+
   const updateSensorState = useCallback((data: Partial<SensorData> & { timestamp?: string; source?: string }) => {
     if (isSimulatingRef.current) return;
     const normalized = normalizeSensorData(data);
